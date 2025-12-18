@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>topological_graph_node</name>
+  <version>0.1.0</version>
+  <description>
+    ROS2 node for generating topological graphs from multi-robot costmaps.
+    
+    Implements skeleton-based topological graph generation with:
+    - GRID-FAST intersection detection
+    - Multi-source BFS for graph construction
+    - Automatic entrance and collision node detection
+    - Graph serialization to JSON and Python pickle formats
+  </description>
+  
+  <maintainer email="filippo.guarda@studio.unibo.it">Filippo Guarda</maintainer>
+  <license>Apache-2.0</license>
+  
+  <author email="filippo.guarda@studio.unibo.it">Filippo Guarda</author>
+  
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  
+  <!-- ROS2 Core Dependencies -->
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>nav_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  
+  <!-- OpenCV -->
+  <depend>cv_bridge</depend>
+  <depend>opencv</depend>
+  
+  <!-- Multi-robot costmap plugin (if separate package) -->
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_clang_format</test_depend>
+  <test_depend>ament_cmake_cppcheck</test_depend>
+  
+  <export>
+    <build_type>ament_cmake</build_type>
+    <doc>
+      <description>
+        Topological graph generation from multi-robot costmaps
+      </description>
+    </doc>
+  </export>
+</package>

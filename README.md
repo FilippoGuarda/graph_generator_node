@@ -1,2 +1,2 @@
-# ESB_graph_node
+# topological_graph_node
 Extended skeleton-based graph generation node

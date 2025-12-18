@@ -1,0 +1,100 @@
+# Topological Graph Generator Configuration
+# All parameters settable via ROS2 parameter system
+
+grid_fast:
+  # Number of rotation directions for intersection detection (4 or 8)
+  num_directions: 4
+  
+  # Connected filter size - gap size for filtering
+  cfilter_size: 1
+  
+  # Minimum group size to consider as a traversable gap (in pixels)
+  min_group_size: 3
+  
+  # Minimum obstacle area to keep (remove smaller obstacles)
+  obstacle_threshold: 20
+
+skeleton:
+  # Maximum BFS propagation steps (equal to 2x robot size typical)
+  max_bfs_steps: 100
+  
+  # Whether to create entrance nodes at budget exhaustion
+  find_entrances: true
+  
+  # Distance threshold for merging nodes close together (pixels)
+  merge_threshold: 5.0
+  
+  # Node types to merge during node merging phase
+  merge_node_types:
+    - "intersection"
+    - "endpoint"
+    - "entrance"
+
+morphology:
+  # Apply dilation after gap analysis
+  apply_dilation: true
+  
+  # Apply erosion after gap analysis
+  apply_erosion: false
+  
+  # Kernel size for morphological operations (3, 5, 7, etc.)
+  kernel_size: 3
+
+output:
+  # Whether to save graph outputs to disk
+  to_file: true
+  
+  # Directory for output files
+  directory: "/tmp/topological_graph"
+  
+  # Include complete skeleton paths in edges
+  include_skeleton_paths: true
+  
+  # Output formats (multiple can be enabled)
+  formats:
+    json: true
+    pickle: true
+    smrta: true
+
+processing:
+  # Occupancy threshold for PGM interpretation (0.0-1.0)
+  # Pixels above this are considered occupied
+  occupancy_threshold: 0.65
+  
+  # Free space threshold for PGM interpretation (0.0-1.0)
+  # Pixels below this are considered free
+  free_threshold: 0.196
+  
+  # Process continuously or on demand
+  continuous: true
+  
+  # If continuous, period between processing cycles (milliseconds)
+  period_ms: 5000
+  
+  # Timeout for processing cycle (ms)
+  timeout_ms: 30000
+
+# ROS2 Topic configuration
+topics:
+  # Subscribe to this costmap topic
+  costmap_in: "global_costmap"
+  
+  # Publish skeleton visualization
+  skeleton_out: "skeleton_map"
+  
+  # Publish filtered map
+  filtered_map_out: "filtered_map"
+  
+  # Service to request graph update
+  update_graph_service: "update_topological_graph"
+
+# Logging configuration
+logging:
+  # Log level (DEBUG, INFO, WARN, ERROR)
+  level: "INFO"
+  
+  # Log detailed statistics
+  detailed_stats: true
+  
+  # Log graph structure to file
+  log_graph_structure: false
