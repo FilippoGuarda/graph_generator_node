@@ -1,6 +1,6 @@
 /**
  * GRID-FAST: Grid-based intersection detection implementation
- * Optimized C++ implementation of the GRID-FAST algorithm
+ * Optimized C++ implementation of the GRID-FAST algorithm for map cleanup
  */
 
 #include "topological_graph_node/grid_fast_processor.h"
