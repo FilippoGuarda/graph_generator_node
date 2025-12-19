@@ -10,14 +10,12 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG -fsanitize=address")
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
+find_package(nav2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
-
-# Include directories
-include_directories(${PROJECT_SOURCE_DIR}/include)
-include_directories(${OpenCV_INCLUDE_DIRS})
 
 # Source files
 set(SOURCES
@@ -27,24 +25,42 @@ set(SOURCES
     src/topological_graph_node.cpp
 )
 
-# Header files
-set(HEADERS
-    include/topological_graph_node/grid_fast_processor.h
-    include/topological_graph_node/skeleton_graph_builder.h
-    include/topological_graph_node/graph_serializer.h
-    include/topological_graph_node/graph_types.h
-    include/topological_graph_node/topological_graph_node.h
+
+add_library(topological_graph_lib STATIC ${SOURCES})
+
+target_link_libraries(topological_graph_lib ${OpenCV_LIBRARIES})
+
+target_include_directories(topological_graph_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
 
-# Create library
-add_library(topological_graph_lib STATIC ${SOURCES})
-target_link_libraries(topological_graph_lib ${OpenCV_LIBRARIES})
-target_include_directories(topological_graph_lib PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(topological_graph_lib PUBLIC ${OpenCV_INCLUDE_DIRS})
 
-# Main executable
+
+ament_target_dependencies(topological_graph_lib
+  rclcpp
+  rclcpp_components
+  nav2_msgs
+  nav_msgs
+  geometry_msgs
+  std_msgs
+  visualization_msgs
+)
+
+
 add_executable(topological_graph_node src/topological_graph_node.cpp)
+
 target_link_libraries(topological_graph_node topological_graph_lib ${OpenCV_LIBRARIES})
 
+ament_target_dependencies(topological_graph_node
+  rclcpp
+  rclcpp_components
+  nav_msgs
+  geometry_msgs
+  std_msgs
+  visualization_msgs
+)
 
 # Compiler flags
 if(MSVC)
@@ -54,5 +70,14 @@ else()
 endif()
 
 # Install targets
-install(TARGETS topological_graph_node DESTINATION bin)
-install(FILES ${HEADERS} DESTINATION include/topological_graph_node)
+install(TARGETS topological_graph_node topological_graph_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# Install headers
+install(DIRECTORY include/ DESTINATION include)
+
+# --- 3. Ament Package ---
+ament_package()
