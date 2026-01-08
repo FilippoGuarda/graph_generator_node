@@ -1,0 +1,23 @@
+graph_generator_node:
+  ros__parameters:
+    # Input topic from GlobalCostmapFusion
+    shared_costmap_topic: "/shared_obstacles"
+    
+    # TF frame ID
+    global_frame: "map"
+    
+    # GRID-FAST preprocessing parameters
+    # Minimum obstacle size in cells to preserve (removes noise)
+    obstacle_size_threshold: 20
+    
+    # Graph building parameters
+    # Maximum BFS propagation budget for each source
+    max_bfs_steps: 100
+    
+    # Enable entrance node creation when a source's budget is exhausted
+    # If false, budget is silently reset without creating nodes
+    find_entrances: true
+    
+    # Node merging distance threshold (reserved, not yet implemented)
+    # Set to 0.0 to disable node merging
+    merge_threshold_pix: 0.0
