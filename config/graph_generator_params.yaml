@@ -1,7 +1,7 @@
 graph_generator_node:
   ros__parameters:
     # Input topic from GlobalCostmapFusion
-    shared_costmap_topic: "/shared_obstacles"
+    shared_costmap_topic: "/robot1/global_costmap"
     
     # TF frame ID
     global_frame: "map"

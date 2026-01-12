@@ -39,9 +39,10 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions & options)
   merge_threshold_pix_ = this->declare_parameter<double>("merge_threshold_pix", 0.0);
 
   costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-      input_topic_, rclcpp::QoS(1).reliable(),
-      std::bind(&GraphGeneratorNode::costmapCallback, this, std::placeholders::_1));
-
+    input_topic_,
+    rclcpp::QoS(1).reliable().transient_local(),
+    std::bind(&GraphGeneratorNode::costmapCallback, this, std::placeholders::_1));
+    
   filtered_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
       "/skeleton_graph/filtered_map", rclcpp::QoS(1).reliable());
 
