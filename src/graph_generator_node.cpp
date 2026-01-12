@@ -12,8 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <algorithm>
 #include "graph_generator_node/graph_generator_node.hpp"
+
+#include <algorithm>
+#include <queue>
+#include <limits>
+#include <unordered_map>
+
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 using namespace std::chrono_literals;
 
@@ -60,16 +67,10 @@ void GraphGeneratorNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::Sha
     return;
   }
 
-  // 1) Costmap -> binary map
   cv::Mat binary = costmapToBinary(*msg);
-
-  // 2) Remove small obstacles
   cv::Mat cleaned = removeSmallObstacles(binary);
-
-  // 3) GRID-FAST-style cleanup (gap/dilation approximation)
   cv::Mat filtered = gridFastLikeCleanup(cleaned);
 
-  // Publish filtered as OccupancyGrid for debugging
   nav_msgs::msg::OccupancyGrid filtered_grid = *msg;
   filtered_grid.data.assign(filtered_grid.data.size(), 0);
   for (int y = 0; y < filtered.rows; ++y) {
@@ -81,10 +82,15 @@ void GraphGeneratorNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::Sha
   }
   filtered_pub_->publish(filtered_grid);
 
-  // 4) Skeleton generation
   cv::Mat skeleton = buildSkeleton(filtered);
 
-  // Publish skeleton occupancy grid
+  if (cv::countNonZero(skeleton) == 0) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "Empty skeleton generated - map may be too cluttered or have no free space corridors");
+    // Still publish empty skeleton for debugging
+  }
+
+
   nav_msgs::msg::OccupancyGrid skeleton_grid = *msg;
   skeleton_grid.data.assign(skeleton_grid.data.size(), 0);
   for (int y = 0; y < skeleton.rows; ++y) {
@@ -96,10 +102,8 @@ void GraphGeneratorNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::Sha
   }
   skeleton_pub_->publish(skeleton_grid);
 
-  // 5) Distance map on skeleton
   cv::Mat dist_map = computeDistanceMap(skeleton);
 
-  // 6) Graph building
   std::vector<GraphNode> nodes;
   std::vector<GraphEdge> edges;
   buildGraph(skeleton, dist_map, nodes, edges);
@@ -108,7 +112,6 @@ void GraphGeneratorNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::Sha
                        "Graph: %zu nodes, %zu edges",
                        nodes.size(), edges.size());
 
-  // 7) Publish graph as MarkerArray for RViz
   publishGraphMarkers(*msg, nodes, edges);
 }
 
@@ -659,3 +662,6 @@ void GraphGeneratorNode::publishGraphMarkers(
 }
 
 }  // namespace graph_generator_node
+
+#include "rclcpp_components/register_node_macro.hpp"
+RCLCPP_COMPONENTS_REGISTER_NODE(graph_generator_node::GraphGeneratorNode)

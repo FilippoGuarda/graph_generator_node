@@ -18,7 +18,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'shared_costmap_topic',
-            default_value='/shared_obstacles',
+            default_value='/robot1/global_costmap',
             description='Input occupancy grid topic from GlobalCostmapFusion'
         ),
         DeclareLaunchArgument(
@@ -28,7 +28,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'obstacle_size_threshold',
-            default_value='20',
+            default_value='2',
             description='Minimum obstacle size (cells) to preserve'
         ),
         DeclareLaunchArgument(
@@ -44,7 +44,7 @@ def generate_launch_description():
         
         Node(
             package='graph_generator_node',
-            executable='graph_generator_node',
+            executable='graph_generator_node_main',
             name='graph_generator_node',
             output='screen',
             emulate_tty=True,

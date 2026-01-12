@@ -12,50 +12,58 @@ find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 
-# Library for graph generator node
-add_library(graph_generator_node_lib src/graph_generator_node.cpp)
+# Shared library for the component (NO main() here)
+add_library(graph_generator_node_lib SHARED
+  src/graph_generator_node.cpp
+)
 target_include_directories(graph_generator_node_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
+  $<INSTALL_INTERFACE:include>
+)
 ament_target_dependencies(graph_generator_node_lib
   rclcpp
   rclcpp_components
   nav_msgs
   visualization_msgs
   geometry_msgs
-  OpenCV)
+  OpenCV
+)
 
-# Component registration with executable
+# Register component, auto-create executable graph_generator_node_main
 rclcpp_components_register_node(graph_generator_node_lib
-  PLUGIN "multi_robot_topology::GraphGeneratorNode"
-  EXECUTABLE graph_generator_node)
+  PLUGIN "graph_generator_node::GraphGeneratorNode"
+  EXECUTABLE graph_generator_node_main
+)
 
-# Installation of library
+# INSTALL shared library
 install(TARGETS
   graph_generator_node_lib
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
+  RUNTIME DESTINATION bin
+)
 
-# Installation of executable
+# INSTALL component executable
 install(TARGETS
-  graph_generator_node
-  DESTINATION lib/${PROJECT_NAME})
+  graph_generator_node_main
+  DESTINATION lib/${PROJECT_NAME}
+)
 
-# Installation of launch files
+# Install launch/config/headers
 install(DIRECTORY
   launch/
-  DESTINATION share/${PROJECT_NAME}/launch)
+  DESTINATION share/${PROJECT_NAME}/launch
+)
 
-# Installation of config files
 install(DIRECTORY
   config/
-  DESTINATION share/${PROJECT_NAME}/config)
+  DESTINATION share/${PROJECT_NAME}/config
+)
 
-# Installation of headers
 install(DIRECTORY
   include/
-  DESTINATION include)
+  DESTINATION include
+)
 
 ament_export_include_directories(include)
 
