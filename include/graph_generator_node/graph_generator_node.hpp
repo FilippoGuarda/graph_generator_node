@@ -45,6 +45,9 @@ private:
   cv::Mat buildSkeleton(const cv::Mat & filtered_map);
   cv::Mat computeDistanceMap(const cv::Mat & skeleton);
 
+  // Zhang–Suen thinning (binary skeletonization to 1-pixel width)
+  void thinning(const cv::Mat& src, cv::Mat& dst);
+
   void findSkeletonPoints(const cv::Mat & skeleton,
                           cv::Mat & intersections_mask,
                           cv::Mat & endpoints_mask);

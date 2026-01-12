@@ -137,6 +137,49 @@ cv::Mat GraphGeneratorNode::costmapToBinary(const nav_msgs::msg::OccupancyGrid &
   return binary;
 }
 
+void GraphGeneratorNode::thinning(const cv::Mat& src, cv::Mat& dst) 
+{
+    dst = src.clone();
+    dst /= 255;         // Convert to 0/1
+    cv::Mat prev = cv::Mat::zeros(dst.size(), CV_8UC1);
+    cv::Mat diff;
+
+    do {
+        dst.copyTo(prev);
+        // Iteration 1 & 2
+        for (int iter = 0; iter < 2; ++iter) {
+            cv::Mat marker = cv::Mat::zeros(dst.size(), CV_8UC1);
+            for (int r = 1; r < dst.rows - 1; ++r) {
+                const uchar* prev_row = dst.ptr<uchar>(r - 1);
+                const uchar* curr_row = dst.ptr<uchar>(r);
+                const uchar* next_row = dst.ptr<uchar>(r + 1);
+                uchar* marker_row = marker.ptr<uchar>(r);
+                
+                for (int c = 1; c < dst.cols - 1; ++c) {
+                    // 3x3 neighborhood extraction
+                    int p2 = prev_row[c], p3 = prev_row[c+1], p4 = curr_row[c+1];
+                    int p5 = next_row[c+1], p6 = next_row[c], p7 = next_row[c-1];
+                    int p8 = curr_row[c-1], p9 = prev_row[c-1];
+
+                    int A  = (p2==0 && p3==1) + (p3==0 && p4==1) + (p4==0 && p5==1) + 
+                             (p5==0 && p6==1) + (p6==0 && p7==1) + (p7==0 && p8==1) + 
+                             (p8==0 && p9==1) + (p9==0 && p2==1);
+                    int B  = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+                    int m1 = (iter==0) ? (p2 * p4 * p6) : (p2 * p4 * p8);
+                    int m2 = (iter==0) ? (p4 * p6 * p8) : (p2 * p6 * p8);
+
+                    if (A == 1 && (B >= 2 && B <= 6) && m1 == 0 && m2 == 0)
+                        marker_row[c] = 1;
+                }
+            }
+            dst &= ~marker;
+        }
+        cv::absdiff(dst, prev, diff);
+    } while (cv::countNonZero(diff) > 0);
+    
+    dst *= 255;
+}
+
 cv::Mat GraphGeneratorNode::removeSmallObstacles(const cv::Mat & map_data)
 {
   // map_data: 0 free, 255 occupied
@@ -175,31 +218,15 @@ cv::Mat GraphGeneratorNode::gridFastLikeCleanup(const cv::Mat & cleaned_map)
   return filtered;
 }
 
-cv::Mat GraphGeneratorNode::buildSkeleton(const cv::Mat & filtered_map)
+cv::Mat GraphGeneratorNode::buildSkeleton(const cv::Mat & filtered_map) 
 {
-  // Skeletonize free space
-  cv::Mat bin = (filtered_map == 0);
-  bin.convertTo(bin, CV_8UC1);
-
-  cv::Mat skel(filtered_map.size(), CV_8UC1, cv::Scalar(0));
-  cv::Mat temp;
-  cv::Mat eroded;
-
-  cv::Mat element = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(3, 3));
-  bool done = false;
-  while (!done) {
-    cv::erode(bin, eroded, element);
-    cv::dilate(eroded, temp, element);
-    cv::subtract(bin, temp, temp);
-    cv::bitwise_or(skel, temp, skel);
-    eroded.copyTo(bin);
-
-    if (cv::countNonZero(bin) == 0) {
-      done = true;
-    }
-  }
-
-  return skel;
+    cv::Mat bin;
+    cv::threshold(filtered_map, bin, 127, 255, cv::THRESH_BINARY_INV);
+    
+    cv::Mat skeleton;
+    thinning(bin, skeleton); // This call works now
+    
+    return skeleton;
 }
 
 cv::Mat GraphGeneratorNode::computeDistanceMap(const cv::Mat & skeleton)
@@ -229,7 +256,8 @@ void GraphGeneratorNode::findSkeletonPoints(const cv::Mat & skeleton,
                     1,10, 1,
                     1, 1, 1);
   cv::Mat neighbor_count;
-  cv::filter2D(skel_bin, neighbor_count, CV_32S, kernel, cv::Point(-1,-1), 0, cv::BORDER_CONSTANT);
+  cv::filter2D(skel_bin, neighbor_count, CV_16S, kernel, cv::Point(-1,-1), 0, cv::BORDER_CONSTANT);
+
 
   // Endpoint: neighbor_count == 11 and skeleton>0
   endpoints_mask = (neighbor_count == 11) & (skel_bin > 0);

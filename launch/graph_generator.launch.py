@@ -18,7 +18,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'shared_costmap_topic',
-            default_value='/robot1/global_costmap',
+            default_value='/robot1/global_costmap/costmap',
             description='Input occupancy grid topic from GlobalCostmapFusion'
         ),
         DeclareLaunchArgument(
