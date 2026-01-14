@@ -1,130 +1,66 @@
-#ifndef GRAPH_GENERATOR_NODE__GRAPH_GENERATOR_NODE_HPP_
-#define GRAPH_GENERATOR_NODE__GRAPH_GENERATOR_NODE_HPP_
+#pragma once
 
-#include <mutex>
-#include <string>
-#include <vector>
-#include <unordered_map>
+#include "rclcpp/rclcpp.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
+#include "geometry_msgs/msg/point.hpp"
+#include "opencv2/opencv.hpp"
+#include "skeleton_graph_builder.hpp"
 
-#include <rclcpp/rclcpp.hpp>
-#include <nav_msgs/msg/occupancy_grid.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
-#include <geometry_msgs/msg/point.hpp>
+namespace graph_generator_node {
 
-#include <opencv2/core.hpp>
+using OccupancyGrid = nav_msgs::msg::OccupancyGrid;
+using MarkerArray = visualization_msgs::msg::MarkerArray;
+using Marker = visualization_msgs::msg::Marker;
 
-namespace graph_generator_node
-{
+class GraphGeneratorNode : public rclcpp::Node {
+ public:
+  explicit GraphGeneratorNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
-struct GraphNode
-{
-  int id;
-  cv::Point2i pix;
-  std::string type;  // "intersection", "endpoint", "entrance", "collision"
-};
+ private:
+  // Callbacks
+  void costmapCallback(OccupancyGrid::SharedPtr msg);
 
-struct GraphEdge
-{
-  int u;
-  int v;
-  std::vector<cv::Point2i> path_pixels;
-  double weight{};
-};
+  // ROS2 Publishers and Subscribers
+  rclcpp::Subscription<OccupancyGrid>::SharedPtr costmap_sub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr filtered_pub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr skeleton_pub_;
+  rclcpp::Publisher<MarkerArray>::SharedPtr graph_marker_pub_;
 
-class GraphGeneratorNode : public rclcpp::Node
-{
-public:
-  explicit GraphGeneratorNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-
-private:
-  void costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
-
-  cv::Mat costmapToBinary(const nav_msgs::msg::OccupancyGrid & grid);
-  cv::Mat removeSmallObstacles(const cv::Mat & map_data);
-  cv::Mat gridFastLikeCleanup(const cv::Mat & cleaned_map);
-  cv::Mat buildSkeleton(const cv::Mat & filtered_map);
-  cv::Mat computeDistanceMap(const cv::Mat & skeleton);
-
-  // Zhang–Suen thinning (binary skeletonization to 1-pixel width)
-  void thinning(const cv::Mat& src, cv::Mat& dst);
-
-  void findSkeletonPoints(const cv::Mat & skeleton,
-                          cv::Mat & intersections_mask,
-                          cv::Mat & endpoints_mask);
-  std::vector<cv::Point2i> extractCoordsFromMask(const cv::Mat & mask);
-
-  void buildGraph(const cv::Mat & skeleton,
-                  const cv::Mat & dist_map,
-                  std::vector<GraphNode> & nodes,
-                  std::vector<GraphEdge> & edges);
-
-  void executeBFS(const cv::Mat & skeleton,
-                  const cv::Mat & dist_map,
-                  bool find_entrances,
-                  const std::vector<GraphNode> & initial_nodes,
-                  std::vector<GraphNode> & out_nodes,
-                  std::vector<GraphEdge> & out_edges);
-
-  int createEntranceNode(const cv::Point2i & p,
-                         int parent_src_id,
-                         std::vector<GraphNode> & nodes,
-                         std::vector<GraphEdge> & edges,
-                         const std::unordered_map<int, cv::Point2i> & id_to_pix,
-                         const std::unordered_map<long long, cv::Point2i> & parent_map);
-
-  int createCollisionNode(const cv::Point2i & p,
-                          int src1,
-                          int src2,
-                          std::vector<GraphNode> & nodes,
-                          std::vector<GraphEdge> & edges,
-                          const std::unordered_map<int, cv::Point2i> & id_to_pix,
-                          const std::unordered_map<long long, cv::Point2i> & parent_map);
-
-  std::vector<cv::Point2i> reconstructPath(
-      const cv::Point2i & p,
-      int src_id,
-      const std::unordered_map<long long, cv::Point2i> & parent_map) const;
-
-  std::vector<cv::Point2i> reconstructPathCollision(
-      const cv::Point2i & cur_xy,
-      const cv::Point2i & neigh_xy,
-      int src_current,
-      int src_neighbor,
-      const std::unordered_map<long long, cv::Point2i> & parent_map) const;
-
-  geometry_msgs::msg::Point gridToWorld(const nav_msgs::msg::OccupancyGrid & grid,
-                                        int gx, int gy) const;
-
-  void publishGraphMarkers(const nav_msgs::msg::OccupancyGrid & base_grid,
-                           const std::vector<GraphNode> & nodes,
-                           const std::vector<GraphEdge> & edges);
-
-  static inline long long packKey(int src_id, int x, int y)
-  {
-    return (static_cast<long long>(src_id) << 32) |
-           (static_cast<unsigned int>(y) << 16) |
-           static_cast<unsigned int>(x);
-  }
+  // Map data
+  std::mutex map_mutex_;
+  OccupancyGrid::SharedPtr last_map_;
 
   // Parameters
   std::string input_topic_;
   std::string global_frame_;
-  int obstacle_size_threshold_{20};
-  int max_bfs_steps_{100};
-  bool find_entrances_{true};
-  double merge_threshold_pix_{0.0};  // reserved
+  int obstacle_size_threshold_;
+  int max_bfs_steps_;
+  bool find_entrances_;
+  double merge_threshold_pix_;
+  double inflation_radius_;
+  int min_junction_pixels_;
+  double entrance_threshold_;
 
-  // ROS interfaces
-  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
-  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr filtered_pub_;
-  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr skeleton_pub_;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_marker_pub_;
+  // Map preprocessing functions
+  cv::Mat costmapToBinary(const OccupancyGrid& costmap);
+  cv::Mat removeSmallObstacles(const cv::Mat& map_data);
+  cv::Mat gridFastLikeCleanup(const cv::Mat& cleaned_map);
+  void thinning(const cv::Mat& src, cv::Mat& dst);
 
-  // State
-  nav_msgs::msg::OccupancyGrid::SharedPtr last_map_;
-  std::mutex map_mutex_;
+  // Skeleton and distance map
+  cv::Mat buildSkeleton(const cv::Mat& filtered_map);
+  cv::Mat computeDistanceMap(const cv::Mat& skeleton);
+
+  // Visualization
+  void publishGraphMarkers(
+    const OccupancyGrid& costmap,
+    const std::vector<GraphNode>& nodes,
+    const std::vector<GraphEdge>& edges);
+
+  // Coordinate conversion
+  geometry_msgs::msg::Point gridToWorld(
+    const OccupancyGrid& costmap, int x, int y) const;
 };
 
 }  // namespace graph_generator_node
-
-#endif  // GRAPH_GENERATOR_NODE__GRAPH_GENERATOR_NODE_HPP_
