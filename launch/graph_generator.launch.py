@@ -32,6 +32,11 @@ def generate_launch_description():
             description='Minimum obstacle size (cells) to preserve'
         ),
         DeclareLaunchArgument(
+            'merge_threshold_pix',
+            default_value='200.0', 
+            description='Distance threshold for merging close nodes (in pixels, 0=disabled)'
+        ),
+        DeclareLaunchArgument(
             'max_bfs_steps',
             default_value='100',
             description='Maximum BFS propagation budget for graph building'

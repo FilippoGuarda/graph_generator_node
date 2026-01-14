@@ -20,7 +20,7 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
     find_entrances_ = this->declare_parameter(
         "find_entrances", true);
     merge_threshold_pix_ = this->declare_parameter(
-        "merge_threshold_pix", 0.0);
+        "merge_threshold_pix", 50.0);
 
     // Subscriptions
     costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -76,10 +76,7 @@ void GraphGeneratorNode::costmapCallback(
     // Step 6: Publish skeleton
     publishSkeletonMap(*msg, skeleton);
 
-    // Step 7: Compute distance map
-    // CRITICAL FIX: Compute distance on the filtered map (obstacles), not the skeleton
-    // filtered map: 0=Free (becomes high dist), 255=Obstacle (becomes 0 dist)
-    // We want distance from Obstacles.
+    // Step 7: Compute distance map (from obstacles, not skeleton)
     cv::Mat distmap = computeDistanceMap(filtered);
 
     // Step 8: Build graph using SkeletonGraphBuilder
@@ -87,6 +84,12 @@ void GraphGeneratorNode::costmapCallback(
     auto [graph, node_positions] = builder.buildGraph(
         max_bfs_steps_,
         find_entrances_);
+
+    // Step 8b: Merge close nodes if threshold is set
+    if (merge_threshold_pix_ > 0.0) {
+      std::vector<std::string> types_to_merge = {"intersection", "endpoint", "collision"};
+      node_positions = builder.mergeCloseNodes(merge_threshold_pix_, types_to_merge);
+    }
 
     // Step 9: Publish graph visualization
     publishGraphMarkers(*msg, graph);
@@ -242,10 +245,7 @@ void GraphGeneratorNode::thinning(const cv::Mat& src, cv::Mat& dst) {
                     }
                 }
             }
-            // Apply marker to dst (set marked pixels to 0)
-            // dst &= ~marker
-            // But here dst is 0/1, marker is 0/1. We want to remove marked.
-            // So if marker is 1, dst becomes 0.
+            // Remove marked pixels
             for(int r=0; r<dst.rows; ++r) {
                 uchar* d = dst.ptr<uchar>(r);
                 const uchar* m = marker.ptr<uchar>(r);
@@ -266,19 +266,15 @@ void GraphGeneratorNode::thinning(const cv::Mat& src, cv::Mat& dst) {
 }
 
 cv::Mat GraphGeneratorNode::computeDistanceMap(const cv::Mat& obstacle_map) {
-    // Python logic:
-    // self.dist_map = distance_transform(obstacles_inverted)
-    // obstacle_map here is: 255=Obstacle, 0=Free
-    // We want distance TO the nearest obstacle.
-    // In OpenCV, distanceTransform calculates distance to nearest ZERO pixel.
-    // So we need obstacles to be ZERO.
+    // obstacle_map: 255=Obstacle, 0=Free
+    // We want distance TO the nearest obstacle
+    // distanceTransform calculates distance to nearest ZERO pixel
+    // So invert: Obstacles(255)->0, Free(0)->255
     
     cv::Mat inv_obstacles;
-    // Invert: Obstacles(255)->0, Free(0)->255
     cv::threshold(obstacle_map, inv_obstacles, 0, 255, cv::THRESH_BINARY_INV);
 
     cv::Mat dist;
-    // Euclidean distance (DIST_L2), 5x5 mask (DIST_MASK_5)
     cv::distanceTransform(inv_obstacles, dist, cv::DIST_L2, cv::DIST_MASK_5);
 
     cv::Mat dist32;
