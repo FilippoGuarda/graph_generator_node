@@ -1,488 +1,352 @@
-// Copyright 2025 Filippo Guarda
-// Licensed under the Apache License, Version 2.0
-
 #include "graph_generator_node/skeleton_graph_builder.hpp"
+#include <opencv2/imgproc.hpp>
+#include <queue>
+#include <tuple>
 #include <algorithm>
 #include <cmath>
-#include <iostream>
+#include <limits>
+#include <iostream> // Added for debug logging
 
 namespace graph_generator_node {
 
-SkeletonGraphBuilder::SkeletonGraphBuilder(const cv::Mat& skeleton,
-                                           const cv::Mat& dist_map)
-  : skeleton_(skeleton.clone()), dist_map_(dist_map.clone()),
-    height_(skeleton.rows), width_(skeleton.cols), next_node_id_(0) {
-  // Ensure skeleton is binary (0 or 1)
-  cv::threshold(skeleton_, skeleton_, 0, 1, cv::THRESH_BINARY);
+SkeletonGraphBuilder::SkeletonGraphBuilder(
+    const cv::Mat& skeleton,
+    const cv::Mat& distmap)
+    : skeleton_(skeleton),
+      distmap_(distmap),
+      height_(skeleton.rows),
+      width_(skeleton.cols) {
+    graph_ = std::make_shared<NetworkX>();
+    next_node_id_ = 0;
 }
 
-// ============================================================================
-// PUBLIC API
-// ============================================================================
+std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
+SkeletonGraphBuilder::buildGraph(int max_steps, bool find_entrances) {
+    std::cout << "[SkeletonGraphBuilder] Starting buildGraph..." << std::endl;
+    
+    // Step 1: Find skeleton points (intersections and endpoints)
+    cv::Mat intersections_mask, endpoints_mask;
+    findSkeletonPoints(intersections_mask, endpoints_mask);
 
-std::pair<std::vector<GraphNode>, std::vector<GraphEdge>>
-SkeletonGraphBuilder::buildGraph(int max_bfs_steps, bool find_entrances,
-                                  float merge_threshold) {
-  nodes_.clear();
-  edges_.clear();
-  next_node_id_ = 0;
+    std::vector<cv::Point2i> inter_coords = extractCoordsFromMask(intersections_mask);
+    std::vector<cv::Point2i> endpoint_coords = extractCoordsFromMask(endpoints_mask);
 
-  // Step 1: Find initial skeleton points (intersections and endpoints)
-  cv::Mat inter_mask, endpoint_mask;
-  findSkeletonPoints(inter_mask, endpoint_mask);
+    std::cout << "[SkeletonGraphBuilder] Found " << inter_coords.size() << " intersections and " 
+              << endpoint_coords.size() << " endpoints." << std::endl;
 
-  auto inter_coords = extractCoordsFromMask(inter_mask);
-  auto endpoint_coords = extractCoordsFromMask(endpoint_mask);
-
-  // Step 2: Create initial nodes
-  std::vector<GraphNode> initial_nodes;
-
-  for (const auto& p : inter_coords) {
-    GraphNode n;
-    n.id = next_node_id_++;
-    n.pix = cv::Point2i(p.x, p.y);
-    n.type = "intersection";
-    initial_nodes.push_back(n);
-  }
-
-  for (const auto& p : endpoint_coords) {
-    GraphNode n;
-    n.id = next_node_id_++;
-    n.pix = cv::Point2i(p.x, p.y);
-    n.type = "endpoint";
-    initial_nodes.push_back(n);
-  }
-
-  if (initial_nodes.empty()) {
-    std::cerr << "WARNING: No initial skeleton points found\n";
-    return {nodes_, edges_};
-  }
-
-  // Step 3: Execute BFS to build graph
-  executeBFS(initial_nodes, find_entrances, max_bfs_steps);
-
-  return {nodes_, edges_};
-}
-
-// ============================================================================
-// SKELETON ANALYSIS
-// ============================================================================
-
-void SkeletonGraphBuilder::findSkeletonPoints(cv::Mat& intersections_mask,
-                                               cv::Mat& endpoints_mask) {
-  // Binarize skeleton
-  cv::Mat skel_bin;
-  cv::threshold(skeleton_, skel_bin, 0, 1, cv::THRESH_BINARY);
-
-  // Count neighbors: kernel weights center 10x, neighbors 1x each
-  cv::Mat kernel =
-    (cv::Mat_<int>(3, 3) << 1, 1, 1, 1, 10, 1, 1, 1, 1);
-  cv::Mat neighbor_count;
-  cv::filter2D(skel_bin, neighbor_count, CV_16S, kernel, cv::Point(-1, -1), 0,
-               cv::BORDER_CONSTANT);
-
-  // Endpoint: exactly 1 neighbor (center weighted 10 + 1 neighbor = 11)
-  endpoints_mask = cv::Mat::zeros(skeleton_.size(), CV_8U);
-  for (int y = 0; y < height_; ++y) {
-    for (int x = 0; x < width_; ++x) {
-      if (neighbor_count.at<short>(y, x) == 11 && skel_bin.at<uchar>(y, x) > 0) {
-        endpoints_mask.at<uchar>(y, x) = 255;
-      }
+    if (inter_coords.empty() && endpoint_coords.empty()) {
+        std::cout << "[SkeletonGraphBuilder] WARNING: No skeleton points found. Graph will be empty." << std::endl;
+        return {graph_, {}};
     }
-  }
 
-  // Detect junctions via template matching
-  detectAllJunctions(intersections_mask);
+    // Step 2: Build initial nodes dictionary
+    std::unordered_map<int, std::pair<int, int>> inter_positions;
+    for (size_t i = 0; i < inter_coords.size(); ++i) {
+        inter_positions[i] = {inter_coords[i].x, inter_coords[i].y};
+    }
+
+    std::unordered_map<int, std::pair<int, int>> endpoint_positions;
+    for (size_t i = 0; i < endpoint_coords.size(); ++i) {
+        endpoint_positions[inter_positions.size() + i] = {endpoint_coords[i].x, endpoint_coords[i].y};
+    }
+
+    // Step 3: Execute multi-source BFS
+    buildGraphMultiSourceBFS(inter_positions, endpoint_positions, find_entrances, max_steps);
+
+    // Step 4: Collect node positions from graph
+    std::unordered_map<int, std::pair<int, int>> node_positions;
+    for (const auto& [nid, node] : graph_->nodes()) {
+        node_positions[nid] = node.position;
+    }
+    
+    std::cout << "[SkeletonGraphBuilder] Finished. Graph nodes: " << graph_->nodes().size() 
+              << ", Edges: " << graph_->edges().size() << std::endl;
+
+    return {graph_, node_positions};
 }
 
-void SkeletonGraphBuilder::detectAllJunctions(cv::Mat& junctions_mask) {
-  junctions_mask = cv::Mat::zeros(skeleton_.size(), CV_8U);
+void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
+    const std::unordered_map<int, std::pair<int, int>>& intersection_positions,
+    const std::unordered_map<int, std::pair<int, int>>& endpoint_positions,
+    bool find_entrances,
+    int max_steps) {
+    
+    // Initialize tracking structures
+    cv::Mat visited_src(height_, width_, CV_32S, cv::Scalar(-1));
+    cv::Mat visited_dist(height_, width_, CV_32S);
+    visited_dist.setTo(std::numeric_limits<int>::max());
+    
+    std::unordered_map<long long, cv::Point2i> parent_map;
+    std::queue<std::tuple<int, int, int, int>> queue; // x, y, srcid, remaining_budget
 
-  // Binarize skeleton
-  cv::Mat skel_bin;
-  cv::threshold(skeleton_, skel_bin, 0, 1, cv::THRESH_BINARY);
+    // Add all initial nodes to graph
+    graph_->clear();
+    next_node_id_ = 0;
 
-  // Helper lambda for hit-or-miss: properly handling binary patterns
-  // Pattern value: 0 = must be background, 1 = must be foreground, -1 = don't care
-  auto applyHitOrMiss = [&](const cv::Mat& pattern) {
-    for (int y = 1; y < height_ - 1; ++y) {
-      for (int x = 1; x < width_ - 1; ++x) {
-        if (skel_bin.at<uchar>(y, x) == 0) continue; // Center must be skeleton
+    for (const auto& [nid, pos] : intersection_positions) {
+        graph_->addNode(nid, pos, "intersection");
+    }
+    for (const auto& [nid, pos] : endpoint_positions) {
+        graph_->addNode(nid, pos, "endpoint");
+    }
 
-        bool match = true;
-        for (int py = -1; py <= 1; ++py) {
-          for (int px = -1; px <= 1; ++px) {
-            int pat_val = pattern.at<char>(py + 1, px + 1);
-            if (pat_val == -1) continue; // Don't care
+    // Collect all initial nodes
+    std::vector<std::tuple<int, std::pair<int, int>, std::string>> all_nodes;
+    for (const auto& [nid, pos] : intersection_positions) {
+        all_nodes.push_back({nid, pos, "intersection"});
+    }
+    for (const auto& [nid, pos] : endpoint_positions) {
+        all_nodes.push_back({nid, pos, "endpoint"});
+    }
+    
+    int max_id = -1;
+    if(!all_nodes.empty()) {
+         for(const auto& item : all_nodes) max_id = std::max(max_id, std::get<0>(item));
+         next_node_id_ = max_id + 1;
+    }
 
-            int skel_val = skel_bin.at<uchar>(y + py, x + px);
-            if (pat_val == 1 && skel_val == 0) {
-              match = false;
-              break;
+    // Initialize queue
+    for (const auto& [nid, pos, node_type] : all_nodes) {
+        int x = pos.first;
+        int y = pos.second;
+        
+        if (x < 0 || x >= width_ || y < 0 || y >= height_) continue;
+        if (skeleton_.at<uchar>(y, x) == 0) continue;
+
+        // Verify distmap access
+        float dist_val = distmap_.at<float>(y, x);
+        int initial_budget = static_cast<int>(dist_val);
+        
+        // Debug low budget
+        if (initial_budget <= 0) {
+            // std::cout << "Warning: Node " << nid << " at " << x << "," << y << " has 0 budget (dist=" << dist_val << ")" << std::endl;
+        }
+        
+        visited_src.at<int>(y, x) = nid;
+        visited_dist.at<int>(y, x) = 0;
+        parent_map[packKey(nid, x, y)] = cv::Point2i(-1, -1);
+        
+        queue.push(std::make_tuple(x, y, nid, initial_budget));
+    }
+
+    std::cout << "[SkeletonGraphBuilder] BFS Queue initialized with " << queue.size() << " sources." << std::endl;
+
+    // Execute BFS
+    executeBFS(queue, visited_src, visited_dist, parent_map, find_entrances, max_steps);
+}
+
+void SkeletonGraphBuilder::executeBFS(
+    std::queue<std::tuple<int, int, int, int>>& queue,
+    cv::Mat& visited_src,
+    cv::Mat& visited_dist,
+    std::unordered_map<long long, cv::Point2i>& parent_map,
+    bool find_entrances,
+    int max_steps) {
+    
+    int iterations = 0;
+    while (!queue.empty()) {
+        iterations++;
+        auto [x, y, srcid, remaining_budget] = queue.front();
+        queue.pop();
+
+        for (const auto& [nx, ny] : neighbors8(x, y)) {
+            if (skeleton_.at<uchar>(ny, nx) == 0) continue;
+
+            int other_src = visited_src.at<int>(ny, nx);
+
+            if (other_src == -1) {
+                // Unvisited
+                int new_distance = visited_dist.at<int>(y, x) + 1;
+                int new_budget = remaining_budget - 1;
+
+                if (new_budget > 0) {
+                    visited_src.at<int>(ny, nx) = srcid;
+                    visited_dist.at<int>(ny, nx) = new_distance;
+                    parent_map[packKey(srcid, nx, ny)] = cv::Point2i(x, y);
+                    queue.push(std::make_tuple(nx, ny, srcid, new_budget));
+                } else if (new_budget == 0) {
+                    // Exhausted budget
+                    visited_src.at<int>(ny, nx) = srcid;
+                    visited_dist.at<int>(ny, nx) = new_distance;
+                    parent_map[packKey(srcid, nx, ny)] = cv::Point2i(x, y);
+
+                    if (find_entrances) {
+                        int entrance_id = createEntranceNode(cv::Point2i(nx, ny), srcid, parent_map);
+                        visited_src.at<int>(ny, nx) = entrance_id;
+                        parent_map[packKey(entrance_id, nx, ny)] = cv::Point2i(-1, -1);
+                        int entrance_budget = static_cast<int>(distmap_.at<float>(ny, nx));
+                        queue.push(std::make_tuple(nx, ny, entrance_id, entrance_budget));
+                    } else {
+                        int reset_budget = static_cast<int>(distmap_.at<float>(ny, nx));
+                        queue.push(std::make_tuple(nx, ny, srcid, reset_budget));
+                    }
+                }
+            } else if (other_src != srcid) {
+                // Collision
+                bool current_budget_exhausted = (remaining_budget <= 0);
+                int local_narrowness = static_cast<int>(distmap_.at<float>(ny, nx));
+                bool other_budget_exhausted = (visited_dist.at<int>(ny, nx) >= local_narrowness);
+
+                if (current_budget_exhausted && other_budget_exhausted) {
+                    visited_src.at<int>(ny, nx) = srcid;
+                    visited_dist.at<int>(ny, nx) = visited_dist.at<int>(y, x) + 1;
+                    parent_map[packKey(srcid, nx, ny)] = cv::Point2i(x, y);
+
+                    int collision_id = createCollisionNode(cv::Point2i(nx, ny), srcid, other_src, parent_map);
+                    visited_src.at<int>(ny, nx) = collision_id;
+                    parent_map[packKey(collision_id, nx, ny)] = cv::Point2i(-1, -1);
+                    queue.push(std::make_tuple(nx, ny, collision_id, max_steps));
+                } else {
+                    // Standard merge
+                    int u = std::min(srcid, other_src);
+                    int v = std::max(srcid, other_src);
+                    if (!graph_->hasEdge(u, v)) {
+                        std::vector<cv::Point2i> path = reconstructPathCollision(
+                            cv::Point2i(x, y), cv::Point2i(nx, ny), srcid, other_src, parent_map);
+                        if (!path.empty()) {
+                            graph_->addEdge(u, v, path, static_cast<double>(path.size()));
+                        }
+                    }
+                }
             }
-            if (pat_val == 0 && skel_val != 0) {
-              match = false;
-              break;
-            }
-          }
-          if (!match) break;
         }
-
-        if (match) {
-          junctions_mask.at<uchar>(y, x) = 255;
-        }
-      }
     }
-  };
-
-  // Define template patterns (using -1 for "don't care")
-  std::vector<cv::Mat> base_templates;
-
-  // T-junction
-  base_templates.push_back((cv::Mat_<char>(3, 3) << 0, 1, 0, 1, 1, 1, 0, 0, 0));
-  // Y-junction
-  base_templates.push_back((cv::Mat_<char>(3, 3) << 1, 0, 1, 0, 1, 0, 0, 1, 0));
-  // Asymmetric patterns (HX, TY, YT, YH, HY)
-  base_templates.push_back(
-    (cv::Mat_<char>(3, 3) << 1, 0, 1, 0, 1, 0, 1, 0, 0));
-  base_templates.push_back(
-    (cv::Mat_<char>(3, 3) << 0, 0, 1, 1, 1, 0, 0, 1, 0));
-  base_templates.push_back(
-    (cv::Mat_<char>(3, 3) << 1, 0, 0, 0, 1, 1, 0, 1, 0));
-  base_templates.push_back(
-    (cv::Mat_<char>(3, 3) << 1, 0, 1, 0, 1, 1, 0, 1, 0));
-  base_templates.push_back(
-    (cv::Mat_<char>(3, 3) << 1, 0, 1, 1, 1, 0, 0, 1, 0));
-
-  // Apply all rotations
-  for (const auto& templ : base_templates) {
-    cv::Mat current = templ.clone();
-
-    for (int rotation = 0; rotation < 4; ++rotation) {
-      applyHitOrMiss(current);
-
-      if (rotation < 3) {
-        // Rotate 90 degrees clockwise
-        cv::Mat rotated;
-        cv::rotate(current, rotated, cv::ROTATE_90_CLOCKWISE);
-        // For a 3x3 pattern, cv::rotate handles it fine
-        current = rotated;
-      }
-    }
-  }
-
-  // Plus and X patterns (4-way and diagonal)
-  cv::Mat plus = (cv::Mat_<char>(3, 3) << 0, 1, 0, 1, 1, 1, 0, 1, 0);
-  cv::Mat x_pat = (cv::Mat_<char>(3, 3) << 1, 0, 1, 0, 1, 0, 1, 0, 1);
-
-  applyHitOrMiss(plus);
-  applyHitOrMiss(x_pat);
+    // std::cout << "[SkeletonGraphBuilder] BFS iterations: " << iterations << std::endl;
 }
 
-std::vector<cv::Point2i> SkeletonGraphBuilder::extractCoordsFromMask(
-  const cv::Mat& mask) {
-  std::vector<cv::Point2i> coords;
-  for (int y = 0; y < mask.rows; ++y) {
-    for (int x = 0; x < mask.cols; ++x) {
-      if (mask.at<uchar>(y, x) > 0) {
-        coords.push_back(cv::Point2i(x, y));
-      }
-    }
-  }
-  return coords;
+int SkeletonGraphBuilder::createEntranceNode(
+    const cv::Point2i& p, int parent_src_id, std::unordered_map<long long, cv::Point2i>& parent_map) {
+    int entrance_id = next_node_id_++;
+    graph_->addNode(entrance_id, {p.x, p.y}, "entrance");
+    std::vector<cv::Point2i> path = reconstructPath(p, parent_src_id, parent_map);
+    if (!path.empty()) graph_->addEdge(parent_src_id, entrance_id, path, static_cast<double>(path.size()));
+    return entrance_id;
 }
 
-// ============================================================================
-// BFS EXECUTION (LEVEL-SYNCHRONIZED, BUDGET-BASED)
-// ============================================================================
-
-void SkeletonGraphBuilder::executeBFS(const std::vector<GraphNode>& initial_nodes,
-                                       bool find_entrances, int max_bfs_steps) {
-  // Initialize tracking arrays
-  visited_src_ = cv::Mat::ones(height_, width_, CV_32S) * -1;
-  visited_dist_ = cv::Mat(height_, width_, CV_32S, cv::Scalar(INT_MAX));
-  parent_.clear();
-
-  // Add initial nodes to graph and queue
-  std::queue<BFSState> q;
-  nodes_ = initial_nodes;
-
-  for (const auto& node : initial_nodes) {
-    int x = node.pix.x;
-    int y = node.pix.y;
-
-    // CRITICAL: Don't filter valid initial nodes!
-    // Accept all initial nodes from skeleton point detection
-    if (x >= 0 && x < width_ && y >= 0 && y < height_) {
-      if (skeleton_.at<uchar>(y, x) > 0) {
-        // Initialize with local distance as budget
-        int initial_budget = static_cast<int>(dist_map_.at<float>(y, x));
-
-        visited_src_.at<int>(y, x) = node.id;
-        visited_dist_.at<int>(y, x) = 0;
-        parent_[packKey(node.id, x, y)] = cv::Point2i(-1, -1);
-
-        // Create BFS state with distance tracking for level-sync
-        q.push(BFSState(x, y, node.id, initial_budget, 0));
-      }
+int SkeletonGraphBuilder::createCollisionNode(
+    const cv::Point2i& p, int src1, int src2, std::unordered_map<long long, cv::Point2i>& parent_map) {
+    int collision_id = next_node_id_++;
+    graph_->addNode(collision_id, {p.x, p.y}, "collision");
+    for (int src : {src1, src2}) {
+        std::vector<cv::Point2i> path = reconstructPath(p, src, parent_map);
+        if (!path.empty()) graph_->addEdge(src, collision_id, path, static_cast<double>(path.size()));
     }
-  }
-
-  // Execute level-synchronized BFS
-  while (!q.empty()) {
-    BFSState state = q.front();
-    q.pop();
-
-    int x = state.x;
-    int y = state.y;
-    int src_id = state.src_id;
-    int remaining_budget = state.remaining_budget;
-
-    // Expand to all 8-neighbors
-    auto neighbors = neighbors8(x, y);
-    for (const auto& neighbor : neighbors) {
-      int nx = neighbor.x;
-      int ny = neighbor.y;
-
-      // Skip if not on skeleton
-      if (skeleton_.at<uchar>(ny, nx) == 0) continue;
-
-      int other_src = visited_src_.at<int>(ny, nx);
-
-      if (other_src == -1) {
-        // Unvisited pixel
-        if (!processUnvisitedPixel(x, y, nx, ny, src_id, remaining_budget,
-                                    find_entrances, max_bfs_steps, q)) {
-          continue;
-        }
-      } else if (other_src != src_id) {
-        // Collision with different source
-        processCollision(x, y, nx, ny, src_id, remaining_budget, other_src,
-                         max_bfs_steps, q);
-      }
-    }
-  }
+    return collision_id;
 }
 
-bool SkeletonGraphBuilder::processUnvisitedPixel(int x, int y, int nx, int ny,
-                                                  int src_id, int remaining_budget,
-                                                  bool find_entrances,
-                                                  int max_bfs_steps,
-                                                  std::queue<BFSState>& queue) {
-  int new_distance = visited_dist_.at<int>(y, x) + 1;
-  int new_budget = remaining_budget - 1;
-
-  if (new_budget > 0) {
-    // Continue with current source
-    visited_src_.at<int>(ny, nx) = src_id;
-    visited_dist_.at<int>(ny, nx) = new_distance;
-    parent_[packKey(src_id, nx, ny)] = cv::Point2i(x, y);
-    queue.push(BFSState(nx, ny, src_id, new_budget, new_distance));
-
-  } else if (new_budget == 0) {
-    // Budget EXACTLY exhausted - entrance condition
-    visited_src_.at<int>(ny, nx) = src_id;
-    visited_dist_.at<int>(ny, nx) = new_distance;
-    parent_[packKey(src_id, nx, ny)] = cv::Point2i(x, y);
-
-    if (find_entrances) {
-      // Create entrance node at this boundary
-      int entrance_id = createEntranceNode(cv::Point2i(nx, ny), src_id);
-
-      visited_src_.at<int>(ny, nx) = entrance_id;
-      parent_[packKey(entrance_id, nx, ny)] = cv::Point2i(-1, -1);
-
-      // Entrance propagates with fresh budget
-      int entrance_budget = static_cast<int>(dist_map_.at<float>(ny, nx));
-      queue.push(BFSState(nx, ny, entrance_id, entrance_budget, 0));
-    } else {
-      // No entrances: reset budget and continue with same source
-      int reset_budget = static_cast<int>(dist_map_.at<float>(ny, nx));
-      queue.push(BFSState(nx, ny, src_id, reset_budget, new_distance));
+std::vector<cv::Point2i> SkeletonGraphBuilder::reconstructPath(
+    const cv::Point2i& p, int src_id, const std::unordered_map<long long, cv::Point2i>& parent_map) {
+    std::vector<cv::Point2i> path;
+    cv::Point2i current = p;
+    while (true) {
+        path.push_back(current);
+        long long key = packKey(src_id, current.x, current.y);
+        auto it = parent_map.find(key);
+        if (it == parent_map.end()) break;
+        cv::Point2i parent = it->second;
+        if (parent.x == -1 && parent.y == -1) break;
+        current = parent;
     }
-
-  } else {
-    // new_budget < 0 (shouldn't happen in normal flow, but handle gracefully)
-    visited_src_.at<int>(ny, nx) = src_id;
-    visited_dist_.at<int>(ny, nx) = new_distance;
-    parent_[packKey(src_id, nx, ny)] = cv::Point2i(x, y);
-  }
-
-  return true;
-}
-
-void SkeletonGraphBuilder::processCollision(int x, int y, int nx, int ny,
-                                             int src_id, int remaining_budget,
-                                             int other_src, int max_bfs_steps,
-                                             std::queue<BFSState>& queue) {
-  // Check budget exhaustion for both sources
-  bool current_budget_exhausted = (remaining_budget <= 0);
-  int local_narrowness = static_cast<int>(dist_map_.at<float>(ny, nx));
-  int other_distance = visited_dist_.at<int>(ny, nx);
-
-  // other_budget_exhausted: has other source traveled at least as far as local narrowness?
-  bool other_budget_exhausted = (other_distance >= local_narrowness);
-
-  if (current_budget_exhausted && other_budget_exhausted) {
-    // Both exhausted - create collision node
-    visited_src_.at<int>(ny, nx) = src_id;
-    visited_dist_.at<int>(ny, nx) = visited_dist_.at<int>(y, x) + 1;
-    parent_[packKey(src_id, nx, ny)] = cv::Point2i(x, y);
-
-    int collision_id = createCollisionNode(cv::Point2i(nx, ny), src_id, other_src);
-
-    visited_src_.at<int>(ny, nx) = collision_id;
-    parent_[packKey(collision_id, nx, ny)] = cv::Point2i(-1, -1);
-    visited_dist_.at<int>(ny, nx) = 0;
-
-    // Collision propagates with fresh budget
-    queue.push(BFSState(nx, ny, collision_id, max_bfs_steps, 0));
-
-  } else {
-    // Standard collision: create edge between sources
-    int u = std::min(src_id, other_src);
-    int v = std::max(src_id, other_src);
-
-    // Check if edge already exists
-    bool edge_exists = false;
-    for (const auto& e : edges_) {
-      if ((e.u == u && e.v == v) || (e.u == v && e.v == u)) {
-        edge_exists = true;
-        break;
-      }
-    }
-
-    if (!edge_exists) {
-      auto path = reconstructPathCollision(cv::Point2i(x, y), cv::Point2i(nx, ny),
-                                            src_id, other_src);
-      if (!path.empty()) {
-        GraphEdge edge;
-        edge.u = u;
-        edge.v = v;
-        edge.path_pixels = path;
-        edge.weight = static_cast<float>(path.size());
-        edges_.push_back(edge);
-      }
-    }
-  }
-}
-
-// ============================================================================
-// NODE CREATION
-// ============================================================================
-
-int SkeletonGraphBuilder::createEntranceNode(const cv::Point2i& p,
-                                              int parent_src_id) {
-  int entrance_id = next_node_id_++;
-
-  GraphNode n;
-  n.id = entrance_id;
-  n.pix = p;
-  n.type = "entrance";
-  nodes_.push_back(n);
-
-  // Connect to parent source
-  auto path = reconstructPath(p, parent_src_id);
-  if (!path.empty()) {
-    GraphEdge e;
-    e.u = parent_src_id;
-    e.v = entrance_id;
-    e.path_pixels = path;
-    e.weight = static_cast<float>(path.size());
-    edges_.push_back(e);
-  }
-
-  return entrance_id;
-}
-
-int SkeletonGraphBuilder::createCollisionNode(const cv::Point2i& p, int src1,
-                                               int src2) {
-  int collision_id = next_node_id_++;
-
-  GraphNode n;
-  n.id = collision_id;
-  n.pix = p;
-  n.type = "collision";
-  nodes_.push_back(n);
-
-  // Connect to both sources
-  for (int src : {src1, src2}) {
-    if (std::find_if(edges_.begin(), edges_.end(), [src, collision_id](const GraphEdge& e) {
-          return (e.u == src && e.v == collision_id) ||
-                 (e.u == collision_id && e.v == src);
-        }) == edges_.end()) {
-      auto path = reconstructPath(p, src);
-      if (!path.empty()) {
-        GraphEdge e;
-        e.u = src;
-        e.v = collision_id;
-        e.path_pixels = path;
-        e.weight = static_cast<float>(path.size());
-        edges_.push_back(e);
-      }
-    }
-  }
-
-  return collision_id;
-}
-
-// ============================================================================
-// PATH RECONSTRUCTION
-// ============================================================================
-
-std::vector<cv::Point2i> SkeletonGraphBuilder::reconstructPath(const cv::Point2i& p,
-                                                                int src_id) {
-  std::vector<cv::Point2i> path;
-  cv::Point2i current = p;
-
-  while (true) {
-    path.push_back(current);
-
-    int64_t key = packKey(src_id, current.x, current.y);
-    auto it = parent_.find(key);
-
-    if (it == parent_.end()) break;
-
-    cv::Point2i parent_pix = it->second;
-    if (parent_pix.x < 0 || parent_pix.y < 0) break;
-
-    current = parent_pix;
-  }
-
-  std::reverse(path.begin(), path.end());
-  return path;
+    std::reverse(path.begin(), path.end());
+    return path;
 }
 
 std::vector<cv::Point2i> SkeletonGraphBuilder::reconstructPathCollision(
-  const cv::Point2i& curr_xy, const cv::Point2i& neigh_xy, int src_current,
-  int src_neighbor) {
-  auto path_current = reconstructPath(curr_xy, src_current);
-  auto path_neighbor = reconstructPath(neigh_xy, src_neighbor);
-
-  std::reverse(path_neighbor.begin(), path_neighbor.end());
-  path_current.insert(path_current.end(), path_neighbor.begin(),
-                      path_neighbor.end());
-
-  return path_current;
+    const cv::Point2i& cur_xy, const cv::Point2i& neigh_xy, int src_current, int src_neighbor,
+    const std::unordered_map<long long, cv::Point2i>& parent_map) {
+    std::vector<cv::Point2i> path_current = reconstructPath(cur_xy, src_current, parent_map);
+    std::vector<cv::Point2i> path_neighbor = reconstructPath(neigh_xy, src_neighbor, parent_map);
+    std::reverse(path_neighbor.begin(), path_neighbor.end());
+    path_current.insert(path_current.end(), path_neighbor.begin(), path_neighbor.end());
+    return path_current;
 }
 
-// ============================================================================
-// UTILITY
-// ============================================================================
+void SkeletonGraphBuilder::findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask) {
+    // Ensure strict binary 0/1
+    cv::Mat skel_bin;
+    cv::threshold(skeleton_, skel_bin, 0, 1, cv::THRESH_BINARY);
+
+    // Endpoints detection
+    cv::Mat kernel = (cv::Mat_<int>(3, 3) << 1,1,1, 1,10,1, 1,1,1);
+    cv::Mat neighbor_count;
+    cv::filter2D(skel_bin, neighbor_count, CV_16S, kernel, cv::Point(-1, -1), 0, cv::BORDER_CONSTANT);
+    
+    // Strict match for endpoints (11 means exactly 1 neighbor + center)
+    // skeleton_ must be non-zero at that point
+    endpoints_mask = (neighbor_count == 11) & (skeleton_ != 0);
+
+    // Intersection detection using Hit-or-Miss
+    intersections_mask = cv::Mat::zeros(skeleton_.size(), CV_8U);
+    
+    // Using CV_8U for kernels
+    uint8_t T_d[] = {0,1,0, 1,1,1, 0,0,0}; cv::Mat T(3,3,CV_8U,T_d);
+    uint8_t Y_d[] = {1,0,1, 0,1,0, 0,1,0}; cv::Mat Y(3,3,CV_8U,Y_d);
+    uint8_t HX_d[] = {1,0,1, 0,1,0, 1,0,0}; cv::Mat HX(3,3,CV_8U,HX_d);
+    uint8_t TY_d[] = {0,0,1, 1,1,0, 0,1,0}; cv::Mat TY(3,3,CV_8U,TY_d);
+    uint8_t YT_d[] = {1,0,0, 0,1,1, 0,1,0}; cv::Mat YT(3,3,CV_8U,YT_d);
+    uint8_t YH_d[] = {1,0,1, 0,1,1, 0,1,0}; cv::Mat YH(3,3,CV_8U,YH_d);
+    uint8_t HY_d[] = {1,0,1, 1,1,0, 0,1,0}; cv::Mat HY(3,3,CV_8U,HY_d);
+    uint8_t P_d[] = {0,1,0, 1,1,1, 0,1,0}; cv::Mat plus(3,3,CV_8U,P_d);
+    uint8_t X_d[] = {1,0,1, 0,1,0, 1,0,1}; cv::Mat X(3,3,CV_8U,X_d);
+
+    std::vector<cv::Mat> templates = {T, Y, TY, YT, HX, YH, HY, plus};
+
+    for (const auto& tmpl : templates) {
+        cv::Mat current = tmpl.clone();
+        for (int i = 0; i < 4; ++i) {
+            cv::Mat hit, miss;
+            // Hit: Skeleton has 1s where Template has 1s
+            cv::morphologyEx(skeleton_, hit, cv::MORPH_ERODE, current);
+            
+            // Miss: Background (255-Skeleton) has 1s where Template has 0s
+            // (ones - current) gives us the "must be 0" mask as 1s
+            cv::Mat ones = cv::Mat::ones(3, 3, CV_8U);
+            cv::morphologyEx(255 - skeleton_, miss, cv::MORPH_ERODE, ones - current);
+            
+            intersections_mask = intersections_mask | (hit & miss);
+            
+            cv::Mat rotated;
+            cv::rotate(current, rotated, cv::ROTATE_90_CLOCKWISE);
+            current = rotated;
+        }
+    }
+    
+    // Apply X (symmetric/special)
+    cv::Mat hit, miss;
+    cv::Mat ones = cv::Mat::ones(3, 3, CV_8U);
+    cv::morphologyEx(skeleton_, hit, cv::MORPH_ERODE, X);
+    cv::morphologyEx(255 - skeleton_, miss, cv::MORPH_ERODE, ones - X);
+    intersections_mask = intersections_mask | (hit & miss);
+}
+
+std::vector<cv::Point2i> SkeletonGraphBuilder::extractCoordsFromMask(const cv::Mat& mask) {
+    std::vector<cv::Point2i> coords;
+    for (int y = 0; y < mask.rows; ++y) {
+        const uint8_t* row = mask.ptr<uint8_t>(y);
+        for (int x = 0; x < mask.cols; ++x) {
+            if (row[x] != 0) coords.emplace_back(x, y);
+        }
+    }
+    return coords;
+}
 
 std::vector<cv::Point2i> SkeletonGraphBuilder::neighbors8(int x, int y) {
-  std::vector<cv::Point2i> neighbors;
-  static const int dx[8] = {1, 1, 0, -1, -1, -1, 0, 1};
-  static const int dy[8] = {0, 1, 1, 1, 0, -1, -1, -1};
-
-  for (int i = 0; i < 8; ++i) {
-    int nx = x + dx[i];
-    int ny = y + dy[i];
-    if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_) {
-      neighbors.push_back(cv::Point2i(nx, ny));
+    static const int dx8[] = {-1, -1, 0, 1, 1, 1, 0, -1};
+    static const int dy8[] = {0, 1, 1, 1, 0, -1, -1, -1};
+    std::vector<cv::Point2i> nbs;
+    nbs.reserve(8);
+    for (int k = 0; k < 8; ++k) {
+        int nx = x + dx8[k];
+        int ny = y + dy8[k];
+        if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_) nbs.emplace_back(nx, ny);
     }
-  }
-  return neighbors;
+    return nbs;
+}
+
+long long SkeletonGraphBuilder::packKey(int src_id, int x, int y) {
+    return (static_cast<long long>(src_id) << 32) | 
+           ((static_cast<long long>(y) & 0xFFFF) << 16) | 
+           (static_cast<long long>(x) & 0xFFFF);
 }
 
 } // namespace graph_generator_node

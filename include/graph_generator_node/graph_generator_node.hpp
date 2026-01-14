@@ -1,35 +1,48 @@
 #pragma once
 
-#include "rclcpp/rclcpp.hpp"
-#include "nav_msgs/msg/occupancy_grid.hpp"
-#include "visualization_msgs/msg/marker_array.hpp"
-#include "geometry_msgs/msg/point.hpp"
-#include "opencv2/opencv.hpp"
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <geometry_msgs/msg/point.hpp>
+#include <opencv2/core.hpp>
+#include <memory>
+#include <mutex>
 #include "skeleton_graph_builder.hpp"
 
 namespace graph_generator_node {
-
-using OccupancyGrid = nav_msgs::msg::OccupancyGrid;
-using MarkerArray = visualization_msgs::msg::MarkerArray;
-using Marker = visualization_msgs::msg::Marker;
 
 class GraphGeneratorNode : public rclcpp::Node {
  public:
   explicit GraphGeneratorNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
  private:
-  // Callbacks
-  void costmapCallback(OccupancyGrid::SharedPtr msg);
+  // Callback
+  void costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
 
-  // ROS2 Publishers and Subscribers
-  rclcpp::Subscription<OccupancyGrid>::SharedPtr costmap_sub_;
-  rclcpp::Publisher<OccupancyGrid>::SharedPtr filtered_pub_;
-  rclcpp::Publisher<OccupancyGrid>::SharedPtr skeleton_pub_;
-  rclcpp::Publisher<MarkerArray>::SharedPtr graph_marker_pub_;
+  // Processing pipeline
+  cv::Mat costmapToBinary(const nav_msgs::msg::OccupancyGrid& grid);
+  cv::Mat removeSmallObstacles(const cv::Mat& map);
+  cv::Mat gridFastLikeCleanup(const cv::Mat& cleaned_map);
+  cv::Mat buildSkeleton(const cv::Mat& filtered_map);
+  void thinning(const cv::Mat& src, cv::Mat& dst);
+  cv::Mat computeDistanceMap(const cv::Mat& skeleton);
 
-  // Map data
-  std::mutex map_mutex_;
-  OccupancyGrid::SharedPtr last_map_;
+  // Publishing
+  void publishFilteredMap(const nav_msgs::msg::OccupancyGrid& base_grid, const cv::Mat& filtered);
+  void publishSkeletonMap(const nav_msgs::msg::OccupancyGrid& base_grid, const cv::Mat& skeleton);
+  void publishEmptySkeleton(const nav_msgs::msg::OccupancyGrid& base_grid, const cv::Mat& skeleton);
+  void publishGraphMarkers(const nav_msgs::msg::OccupancyGrid& base_grid,
+                           const std::shared_ptr<NetworkX>& graph);
+
+  // Utilities
+  geometry_msgs::msg::Point gridToWorld(
+      const nav_msgs::msg::OccupancyGrid& grid, int gx, int gy);
+
+  // ROS2 interface
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr filtered_pub_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr skeleton_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_marker_pub_;
 
   // Parameters
   std::string input_topic_;
@@ -38,29 +51,10 @@ class GraphGeneratorNode : public rclcpp::Node {
   int max_bfs_steps_;
   bool find_entrances_;
   double merge_threshold_pix_;
-  double inflation_radius_;
-  int min_junction_pixels_;
-  double entrance_threshold_;
 
-  // Map preprocessing functions
-  cv::Mat costmapToBinary(const OccupancyGrid& costmap);
-  cv::Mat removeSmallObstacles(const cv::Mat& map_data);
-  cv::Mat gridFastLikeCleanup(const cv::Mat& cleaned_map);
-  void thinning(const cv::Mat& src, cv::Mat& dst);
-
-  // Skeleton and distance map
-  cv::Mat buildSkeleton(const cv::Mat& filtered_map);
-  cv::Mat computeDistanceMap(const cv::Mat& skeleton);
-
-  // Visualization
-  void publishGraphMarkers(
-    const OccupancyGrid& costmap,
-    const std::vector<GraphNode>& nodes,
-    const std::vector<GraphEdge>& edges);
-
-  // Coordinate conversion
-  geometry_msgs::msg::Point gridToWorld(
-    const OccupancyGrid& costmap, int x, int y) const;
+  // State
+  std::mutex map_mutex_;
+  nav_msgs::msg::OccupancyGrid::SharedPtr last_map_;
 };
 
 }  // namespace graph_generator_node
