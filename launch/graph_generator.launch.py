@@ -33,12 +33,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'merge_threshold_pix',
-            default_value='0.0', 
+            default_value='5.0', 
             description='Distance threshold for merging close nodes (in pixels, 0=disabled)'
         ),
         DeclareLaunchArgument(
             'max_bfs_steps',
-            default_value='10',
+            default_value='20',
             description='Maximum BFS propagation budget for graph building'
         ),
         DeclareLaunchArgument(
@@ -60,10 +60,10 @@ def generate_launch_description():
                     'obstacle_size_threshold': LaunchConfiguration('obstacle_size_threshold'),
                     'max_bfs_steps': LaunchConfiguration('max_bfs_steps'),
                     'find_entrances': LaunchConfiguration('find_entrances'),
+                    'merge_threshold_pix': LaunchConfiguration('merge_threshold_pix'), 
                 }
             ],
             remappings=[
-                # Override input topic if needed
                 ('/shared_obstacles', LaunchConfiguration('shared_costmap_topic')),
             ]
         ),

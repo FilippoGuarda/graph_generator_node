@@ -14,7 +14,7 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
     global_frame_ = this->declare_parameter(
         "global_frame", "map");
     obstacle_size_threshold_ = this->declare_parameter(
-        "obstacle_size_threshold", 20);
+        "obstacle_size_threshold", 2);
     max_bfs_steps_ = this->declare_parameter(
         "max_bfs_steps", 100);
     find_entrances_ = this->declare_parameter(
@@ -149,7 +149,7 @@ cv::Mat GraphGeneratorNode::costmapToBinary(
             int idx = y * grid.info.width + x;
             int8_t v = grid.data[idx];
             // -1 (unknown) and 50+ (occupied) -> 255 (obstacle)
-            if (v == -1 || v >= 50) {
+            if (v == -1 || v >= 70) {
                 row[x] = 255;
             } else {
                 row[x] = 0; // Free
