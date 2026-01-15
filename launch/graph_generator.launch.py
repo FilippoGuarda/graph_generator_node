@@ -33,12 +33,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'merge_threshold_pix',
-            default_value='200.0', 
+            default_value='0.0', 
             description='Distance threshold for merging close nodes (in pixels, 0=disabled)'
         ),
         DeclareLaunchArgument(
             'max_bfs_steps',
-            default_value='100',
+            default_value='10',
             description='Maximum BFS propagation budget for graph building'
         ),
         DeclareLaunchArgument(

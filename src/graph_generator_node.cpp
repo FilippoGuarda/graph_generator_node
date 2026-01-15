@@ -87,7 +87,7 @@ void GraphGeneratorNode::costmapCallback(
 
     // Step 8b: Merge close nodes if threshold is set
     if (merge_threshold_pix_ > 0.0) {
-      std::vector<std::string> types_to_merge = {"intersection", "endpoint", "collision"};
+      std::vector<std::string> types_to_merge = {"intersection", "entrance", "collision"};
       node_positions = builder.mergeCloseNodes(merge_threshold_pix_, types_to_merge);
     }
 
@@ -324,15 +324,17 @@ void GraphGeneratorNode::publishGraphMarkers(
     edge_marker.color.g = 0.0;
     edge_marker.color.b = 1.0;
 
-    for (const auto& edge : graph->edges()) {
+    for (const auto& [key, edge] : graph->edges()) {
         if (edge.path_pixels.size() < 2) continue;
         for (size_t i = 1; i < edge.path_pixels.size(); ++i) {
             geometry_msgs::msg::Point p1 = gridToWorld(base_grid,
-                edge.path_pixels[i - 1].x, edge.path_pixels[i - 1].y);
+            edge.path_pixels[i - 1].first,    // ← .first not .x
+            edge.path_pixels[i - 1].second);  // ← .second not .y
             geometry_msgs::msg::Point p2 = gridToWorld(base_grid,
-                edge.path_pixels[i].x, edge.path_pixels[i].y);
-            edge_marker.points.push_back(p1);
-            edge_marker.points.push_back(p2);
+            edge.path_pixels[i].first,        // ← .first not .x
+            edge.path_pixels[i].second);      // ← .second not .y
+            edge_marker.points.push_back(p1);   // ← edge_marker not edgemarker
+            edge_marker.points.push_back(p2);   // ← edge_marker not edgemarker
         }
     }
     ma.markers.push_back(edge_marker);

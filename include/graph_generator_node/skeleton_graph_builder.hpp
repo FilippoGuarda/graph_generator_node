@@ -1,170 +1,207 @@
 #pragma once
 
-#include <opencv2/core.hpp>
+#include <opencv2/opencv.hpp>
 #include <unordered_map>
 #include <vector>
+#include <tuple>
 #include <memory>
-#include <string>
 #include <queue>
+#include "network_x.hpp"
 
 namespace graph_generator_node {
 
-// Simple graph class to mimic NetworkX functionality
-class NetworkX {
-public:
-    struct Node {
-        int id;
-        std::pair<int, int> position; // (x, y)
-        std::string type; // "intersection", "endpoint", "entrance", "collision"
-    };
-
-    struct Edge {
-        int u, v;
-        std::vector<cv::Point2i> path_pixels;
-        double weight;
-    };
-
-    void addNode(int id, const std::pair<int, int>& pos, const std::string& node_type) {
-        nodes_[id] = {id, pos, node_type};
-    }
-
-    void addEdge(int u, int v, const std::vector<cv::Point2i>& path, double weight) {
-        edges_.push_back({u, v, path, weight});
-    }
-
-    bool hasEdge(int u, int v) const {
-        for (const auto& edge : edges_) {
-            if ((edge.u == u && edge.v == v) || (edge.u == v && edge.v == u)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void clear() {
-        nodes_.clear();
-        edges_.clear();
-    }
-
-    const std::unordered_map<int, Node>& nodes() const {
-        return nodes_;
-    }
-
-    const std::vector<Edge>& edges() const {
-        return edges_;
-    }
-
-    // New method: Remove node by ID
-    void removeNode(int id) {
-        nodes_.erase(id);
-        // Also remove edges connected to this node
-        auto it = edges_.begin();
-        while (it != edges_.end()) {
-            if (it->u == id || it->v == id) {
-                it = edges_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
-    // New method: Get neighbors of a node
-    std::vector<int> getNeighbors(int node_id) const {
-        std::vector<int> neighbors;
-        for (const auto& edge : edges_) {
-            if (edge.u == node_id) neighbors.push_back(edge.v);
-            else if (edge.v == node_id) neighbors.push_back(edge.u);
-        }
-        return neighbors;
-    }
-
-    // New method: Get edge between two nodes
-    const Edge* getEdge(int u, int v) const {
-        for (const auto& edge : edges_) {
-            if ((edge.u == u && edge.v == v) || (edge.u == v && edge.v == u)) {
-                return &edge;
-            }
-        }
-        return nullptr;
-    }
-
-private:
-    std::unordered_map<int, Node> nodes_;
-    std::vector<Edge> edges_;
-};
-
-// Skeleton graph builder - implements the corrected algorithm
+/**
+ * @class SkeletonGraphBuilder
+ * @brief Builds a topological graph from skeleton images using multi-source BFS
+ * 
+ * Features:
+ * - Multi-source BFS with budget-based propagation
+ * - Automatic entrance node creation at budget boundaries
+ * - Collision detection and node creation for intersecting paths
+ * - Adaptive merging of close nodes with connectivity checks
+ */
 class SkeletonGraphBuilder {
-public:
-    SkeletonGraphBuilder(const cv::Mat& skeleton, const cv::Mat& distmap);
+ public:
+  /**
+   * @brief Constructor
+   * @param skeleton Binary skeleton image (H×W, 0=background, >0=skeleton)
+   * @param distmap Distance transform of skeleton for narrowness estimation
+   */
+  SkeletonGraphBuilder(const cv::Mat& skeleton, const cv::Mat& distmap);
 
-    // Main entry point: builds graph from skeleton and distance map
-    std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
-    buildGraph(int max_steps = 100, bool find_entrances = true);
+  /**
+   * @brief Build graph from skeleton with multi-source BFS
+   * 
+   * Performs the following steps:
+   * 1. Find skeleton intersection and endpoint nodes
+   * 2. Initialize multi-source BFS with budget allocation
+   * 3. Propagate from each source with budget-based termination
+   * 4. Create entrance nodes at budget boundaries if enabled
+   * 5. Create collision nodes where paths from different sources meet
+   * 
+   * @param max_steps Maximum propagation budget per source (typically 2x robot diameter)
+   * @param find_entrances Create entrance nodes at budget boundaries (default: true)
+   * @return Pair of (graph pointer, node_positions_map)
+   */
+  std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
+  buildGraph(int max_steps = 100, bool find_entrances = true);
 
-    // Merge close nodes based on distance threshold
-    std::unordered_map<int, std::pair<int, int>> mergeCloseNodes(
-        double distance_threshold,
-        const std::vector<std::string>& node_types_to_merge = {});
+  /**
+   * @brief Merge nodes within distance threshold
+   * 
+   * Merges nodes that are:
+   * 1. Directly connected in the graph (edge exists between them)
+   * 2. Within Euclidean distance threshold
+   * 3. Compatible types (intersections merge with intersections, etc.)
+   * 
+   * Uses union-find clustering and connectivity cache for O(1) edge lookups.
+   * 
+   * @param distance_threshold Euclidean distance for merging (in pixels)
+   * @param node_types_to_merge Which node types to consider (default: all except endpoints)
+   * @return Updated node positions map after merging
+   */
+  std::unordered_map<int, std::pair<int, int>>
+  mergeCloseNodes(double distance_threshold,
+                  const std::vector<std::string>& node_types_to_merge = {});
 
-private:
-    // Algorithm steps
-    void buildGraphMultiSourceBFS(
-        const std::unordered_map<int, std::pair<int, int>>& intersection_positions,
-        const std::unordered_map<int, std::pair<int, int>>& endpoint_positions,
-        bool find_entrances,
-        int max_steps);
+ private:
+  // Input data
+  cv::Mat skeleton_;
+  cv::Mat distmap_;
+  int height_;
+  int width_;
 
-    void executeBFS(
-        std::queue<std::tuple<int, int, int, int>>& queue,
-        cv::Mat& visited_src,
-        cv::Mat& visited_dist,
-        std::unordered_map<long long, cv::Point2i>& parent_map,
-        bool find_entrances,
-        int max_steps);
+  // Graph state
+  std::shared_ptr<NetworkX> graph_;
+  int next_node_id_;
 
-    int createEntranceNode(
-        const cv::Point2i& p,
-        int parent_src_id,
-        std::unordered_map<long long, cv::Point2i>& parent_map);
+  // ===== Private Methods =====
 
-    int createCollisionNode(
-        const cv::Point2i& p,
-        int src1,
-        int src2,
-        std::unordered_map<long long, cv::Point2i>& parent_map);
+  /**
+   * @brief Execute multi-source BFS from all skeleton sources
+   * 
+   * Each source propagates with its budget. When budgets exhaust simultaneously,
+   * collision nodes are created. Entrances mark budget-only boundaries.
+   */
+  void buildGraphMultiSourceBFS(
+      const std::unordered_map<int, std::pair<int, int>>& intersection_positions,
+      const std::unordered_map<int, std::pair<int, int>>& endpoint_positions,
+      bool find_entrances,
+      int max_steps);
 
-    std::vector<cv::Point2i> reconstructPath(
-        const cv::Point2i& p,
-        int src_id,
-        const std::unordered_map<long long, cv::Point2i>& parent_map);
+  /**
+   * @brief Execute multi-source BFS from queue
+   * 
+   * @param queue BFS queue of (x, y, source_id, remaining_budget)
+   * @param visited_src Map of (x, y) -> source_id at that pixel
+   * @param visited_dist Map of (x, y) -> distance from source to that pixel
+   * @param parent_data Vector-indexed parent tracking: parent_data[y*width + x] = (px, py)
+   * @param find_entrances Create entrance nodes at budget boundaries
+   * @param max_steps Global maximum budget (for collision node propagation)
+   */
+  void executeBFS(
+      std::queue<std::tuple<int, int, int, int>>& queue,
+      cv::Mat& visited_src,
+      cv::Mat& visited_dist,
+      std::vector<std::pair<int, int>>& parent_data,
+      bool find_entrances,
+      int max_steps);
 
-    std::vector<cv::Point2i> reconstructPathCollision(
-        const cv::Point2i& cur_xy,
-        const cv::Point2i& neigh_xy,
-        int src_current,
-        int src_neighbor,
-        const std::unordered_map<long long, cv::Point2i>& parent_map);
+  /**
+   * @brief Create entrance node at budget boundary
+   * @param p Pixel coordinates where entrance is created
+   * @param parent_src_id Source ID that created this entrance
+   * @param parent_data Vector-indexed parent tracking
+   * @return New entrance node ID
+   */
+  int createEntranceNode(const cv::Point2i& p, 
+                         int parent_src_id,
+                         std::vector<std::pair<int, int>>& parent_data);
 
-    // Skeleton analysis
-    void findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask);
+  /**
+   * @brief Create collision node where two sources meet with exhausted budgets
+   * @param p Collision point coordinates
+   * @param src1 First source ID
+   * @param src2 Second source ID
+   * @param parent_data Vector-indexed parent tracking
+   * @return New collision node ID
+   */
+  int createCollisionNode(const cv::Point2i& p, 
+                          int src1, 
+                          int src2,
+                          std::vector<std::pair<int, int>>& parent_data);
 
-    std::vector<cv::Point2i> extractCoordsFromMask(const cv::Mat& mask);
+  /**
+   * @brief Reconstruct path from pixel back to source by following parent pointers
+   * @param p End point (x, y)
+   * @param src_id Source ID (not used in this implementation, for API compatibility)
+   * @param parent_data Vector-indexed parent tracking
+   * @return Path as vector of (x, y) points from source to p
+   */
+  std::vector<cv::Point2i> reconstructPath(
+      const cv::Point2i& p,
+      int src_id,
+      const std::vector<std::pair<int, int>>& parent_data);
 
-    // Merge helper
-    std::pair<int, int> snapToSkeleton(int x, int y, int max_search_radius = 5);
+  /**
+   * @brief Reconstruct path when two sources collide
+   * Combines path from first source backward to collision point
+   * with path from second source backward to collision point
+   * @param cur_xy Current position in first source path
+   * @param neigh_xy Position in second source path
+   * @param src_current Current source ID
+   * @param src_neighbor Neighbor source ID
+   * @param parent_data Vector-indexed parent tracking
+   * @return Combined collision path
+   */
+  std::vector<cv::Point2i> reconstructPathCollision(
+      const cv::Point2i& cur_xy,
+      const cv::Point2i& neigh_xy,
+      int src_current,
+      int src_neighbor,
+      const std::vector<std::pair<int, int>>& parent_data);
 
-    // Utilities
-    std::vector<cv::Point2i> neighbors8(int x, int y);
-    long long packKey(int src_id, int x, int y);
+  /**
+   * @brief Find skeleton intersection and endpoint points
+   * Uses morphological hit-or-miss operations to detect junction types
+   * @param[out] intersections_mask Binary mask of intersection points
+   * @param[out] endpoints_mask Binary mask of endpoint points
+   */
+  void findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask);
 
-    // Member variables
-    cv::Mat skeleton_;
-    cv::Mat distmap_;
-    int height_;
-    int width_;
-    std::shared_ptr<NetworkX> graph_;
-    int next_node_id_;
+  /**
+   * @brief Extract (x, y) coordinates from binary mask
+   * @param mask Binary mask where non-zero pixels are selected
+   * @return Vector of (x, y) coordinates for each selected pixel
+   */
+  std::vector<cv::Point2i> extractCoordsFromMask(const cv::Mat& mask);
+
+  /**
+   * @brief Get 8-connected neighbors of a pixel
+   * @param x X coordinate
+   * @param y Y coordinate
+   * @return Vector of 8 neighboring (x, y) positions (with bounds checking)
+   */
+  std::vector<cv::Point2i> neighbors8(int x, int y);
+
+  /**
+   * @brief Snap a point to nearest skeleton pixel using spiral search
+   * @param x X coordinate (will be clamped to bounds)
+   * @param y Y coordinate (will be clamped to bounds)
+   * @param max_search_radius Maximum search radius in pixels
+   * @return (x, y) coordinates of snapped point on skeleton, or clamped original if not found
+   */
+  std::pair<int, int> snapToSkeleton(int x, int y, int max_search_radius = 10);
+
+  /**
+   * @brief Pack three integers into a single 64-bit key
+   * Used for parent tracking in legacy code (now replaced by vector indexing)
+   * @param src_id Source ID
+   * @param x X coordinate
+   * @param y Y coordinate
+   * @return Packed 64-bit key
+   */
+  long long packKey(int src_id, int x, int y);
 };
 
-} // namespace graph_generator_node
+}  // namespace graph_generator_node

@@ -12,7 +12,7 @@ graph_generator_node:
     
     # Graph building parameters
     # Maximum BFS propagation budget for each source
-    max_bfs_steps: 100
+    max_bfs_steps: 20
     
     # Enable entrance node creation when a source's budget is exhausted
     # If false, budget is silently reset without creating nodes
@@ -20,5 +20,5 @@ graph_generator_node:
     
     # Node merging distance threshold (reserved, not yet implemented)
     # Set to 0.0 to disable node merging
-    merge_threshold_pix: 0.0
+    merge_threshold_pix: 20.0
 0
