@@ -8,8 +8,12 @@
 #include <iostream>
 #include <unordered_set>
 #include <functional>
+#include <rclcpp/rclcpp.hpp>
 
 namespace graph_generator_node {
+
+// Initialize a static logger name for this builder utility
+static const rclcpp::Logger LOGGER = rclcpp::get_logger("skeleton_graph_builder");
 
 SkeletonGraphBuilder::SkeletonGraphBuilder(
     const cv::Mat& skeleton,
@@ -24,7 +28,7 @@ SkeletonGraphBuilder::SkeletonGraphBuilder(
 
 std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
 SkeletonGraphBuilder::buildGraph(int max_steps, bool find_entrances) {
-  std::cout << "[SkeletonGraphBuilder] Starting buildGraph..." << std::endl;
+  RCLCPP_DEBUG(LOGGER, "Starting buildGraph...");
 
   // Step 1: Find skeleton features
   cv::Mat intersections_mask, endpoints_mask;
@@ -33,12 +37,10 @@ SkeletonGraphBuilder::buildGraph(int max_steps, bool find_entrances) {
   std::vector<cv::Point2i> inter_coords = extractCoordsFromMask(intersections_mask);
   std::vector<cv::Point2i> endpoint_coords = extractCoordsFromMask(endpoints_mask);
 
-  std::cout << "[SkeletonGraphBuilder] Found " << inter_coords.size() << " intersections and "
-            << endpoint_coords.size() << " endpoints." << std::endl;
+  RCLCPP_DEBUG(LOGGER, "Found %zu intersections and %zu endpoints.", inter_coords.size(), endpoint_coords.size());
 
   if (inter_coords.empty() && endpoint_coords.empty()) {
-    std::cout << "[SkeletonGraphBuilder] WARNING: No skeleton points found. Graph will be empty."
-              << std::endl;
+    RCLCPP_WARN(LOGGER, "No skeleton points found. Graph will be empty.");
     return {graph_, {}};
   }
 
@@ -62,8 +64,7 @@ SkeletonGraphBuilder::buildGraph(int max_steps, bool find_entrances) {
     node_positions[nid] = node.position;
   }
 
-  std::cout << "[SkeletonGraphBuilder] Finished. Graph nodes: " << graph_->nodes().size()
-            << ", Edges: " << graph_->edges().size() << std::endl;
+  RCLCPP_DEBUG(LOGGER, "Finished. Graph nodes: %zu, Edges: %zu", graph_->nodes().size(), graph_->edges().size());
 
   return {graph_, node_positions};
 }
@@ -135,8 +136,7 @@ void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
     queue.push(std::make_tuple(x, y, nid, initial_budget));
   }
 
-  std::cout << "[SkeletonGraphBuilder] BFS Queue initialized with " << queue.size()
-            << " sources." << std::endl;
+  RCLCPP_DEBUG(LOGGER, "BFS Queue initialized with %zu sources.", queue.size());
 
   // Execute BFS
   executeBFS(queue, visited_src, visited_dist, parent_data, find_entrances, max_steps);
@@ -310,7 +310,7 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
 
   // SAFETY CHECK 1: Validate threshold
   if (distance_threshold <= 0.0) {
-    std::cout << "[SkeletonGraphBuilder] Merge threshold <= 0, skipping merge.\n";
+    RCLCPP_DEBUG(LOGGER, "Merge threshold <= 0, skipping merge.");
     for (const auto& [nid, node] : graph_->nodes()) {
       result[nid] = node.position;
     }
@@ -349,15 +349,15 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
 
   // SAFETY CHECK 2: Minimum nodes
   if (nodes_to_check.size() < 2) {
-    std::cout << "[SkeletonGraphBuilder] Less than 2 nodes to merge, skipping.\n";
+    RCLCPP_DEBUG(LOGGER, "Less than 2 nodes to merge, skipping.");
     for (const auto& [nid, node] : graph_->nodes()) {
       result[nid] = node.position;
     }
     return result;
   }
 
-  std::cout << "[SkeletonGraphBuilder] Merging with EUCLIDEAN + CONNECTIVITY threshold "
-            << distance_threshold << ", checking " << nodes_to_check.size() << " nodes.\n";
+  RCLCPP_DEBUG(LOGGER, "Merging with EUCLIDEAN + CONNECTIVITY threshold %f, checking %zu nodes.", 
+               distance_threshold, nodes_to_check.size());
 
   // OPTIMIZATION: Build adjacency cache for O(1) connectivity checks
   std::unordered_set<long long> edge_cache;
@@ -446,8 +446,8 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
     }
   }
 
-  std::cout << "[SkeletonGraphBuilder] Found " << num_connected_pairs
-            << " connected node pairs, " << num_merged_pairs << " within distance threshold.\n";
+  RCLCPP_DEBUG(LOGGER, "Found %d connected node pairs, %d within distance threshold.", 
+               num_connected_pairs, num_merged_pairs);
 
   // Group nodes by cluster root
   std::unordered_map<int, std::vector<int>> clusters;
@@ -458,7 +458,7 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
     clusters[r].push_back(node_id);
   }
 
-  std::cout << "[SkeletonGraphBuilder] Found " << clusters.size() << " clusters.\n";
+  RCLCPP_DEBUG(LOGGER, "Found %zu clusters.", clusters.size());
 
   std::unordered_set<int> nodes_to_remove;
   int num_merged = 0;
@@ -493,20 +493,17 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
 
     // Validate snap
     if (snapx < 0 || snapx >= width_ || snapy < 0 || snapy >= height_) {
-      std::cout << "[SkeletonGraphBuilder] WARNING: Snap out of bounds (" << snapx << ","
-                << snapy << "), skipping cluster.\n";
+      RCLCPP_WARN(LOGGER, "Snap out of bounds (%d, %d), skipping cluster.", snapx, snapy);
       continue;
     }
 
     if (skeleton_.at<uint8_t>(snapy, snapx) == 0) {
-      std::cout << "[SkeletonGraphBuilder] WARNING: Snap not on skeleton at (" << snapx << ","
-                << snapy << "), skipping cluster.\n";
+      RCLCPP_WARN(LOGGER, "Snap not on skeleton at (%d, %d), skipping cluster.", snapx, snapy);
       continue;
     }
 
     // Create merged node
     int merged_id = next_node_id_++;
-
     std::string merged_type = "intersection";
 
     // Check if this cluster contains entrance/collision nodes
@@ -585,7 +582,7 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
   }
 
   // Remove old nodes
-  std::cout << "[SkeletonGraphBuilder] Removing " << nodes_to_remove.size() << " old nodes...\n";
+  RCLCPP_DEBUG(LOGGER, "Removing %zu old nodes...", nodes_to_remove.size());
 
   for (int node_id : nodes_to_remove) {
     try {
@@ -594,8 +591,9 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
     }
   }
 
-  std::cout << "[SkeletonGraphBuilder] Merged " << num_merged << " clusters. Final: "
-            << graph_->nodes().size() << " nodes, " << graph_->edges().size() << " edges.\n";
+  // Changed to DEBUG (graph building output)
+  RCLCPP_DEBUG(LOGGER, "Merged %d clusters. Final: %zu nodes, %zu edges.", 
+               num_merged, graph_->nodes().size(), graph_->edges().size());
 
   // Return updated node positions
   for (const auto& [nid, node] : graph_->nodes()) {

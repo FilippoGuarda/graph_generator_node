@@ -94,7 +94,7 @@ void GraphGeneratorNode::costmapCallback(
     // Step 9: Publish graph visualization
     publishGraphMarkers(*msg, graph);
 
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
         "Graph: %zu nodes, %zu edges",
         graph->nodes().size(), graph->edges().size());
 }

@@ -12,17 +12,22 @@ find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 
-# Shared library for SkeletonGraphBuilder (core algorithm, no ROS dependencies)
+# Shared library for SkeletonGraphBuilder (depends on rclcpp for debug logging)
 add_library(skeleton_graph_builder SHARED
   src/skeleton_graph_builder.cpp
 )
 target_include_directories(skeleton_graph_builder PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(skeleton_graph_builder
   ${OpenCV_LIBRARIES}
 )
+
+ament_target_dependencies(skeleton_graph_builder 
+  rclcpp 
+) 
 
 # Shared library for the ROS2 component
 add_library(graph_generator_node_lib SHARED
@@ -31,9 +36,11 @@ add_library(graph_generator_node_lib SHARED
 target_include_directories(graph_generator_node_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(graph_generator_node_lib
   skeleton_graph_builder
+  ${OpenCV_LIBRARIES}
 )
 ament_target_dependencies(graph_generator_node_lib
   rclcpp
@@ -41,7 +48,6 @@ ament_target_dependencies(graph_generator_node_lib
   nav_msgs
   visualization_msgs
   geometry_msgs
-  OpenCV
 )
 
 # Register ROS2 component and create executable
@@ -80,6 +86,7 @@ install(DIRECTORY
 )
 
 ament_export_include_directories(include)
-ament_export_libraries(skeleton_graph_builder)
+ament_export_libraries(skeleton_graph_builder graph_generator_node_lib)
+ament_export_dependencies(rclcpp)
 
 ament_package()
