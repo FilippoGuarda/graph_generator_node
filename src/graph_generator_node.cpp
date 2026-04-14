@@ -35,6 +35,8 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
         "skeleton_graph/skeleton_map", rclcpp::QoS(1).reliable().transient_local());
     graph_marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
         "skeleton_graph/graph_markers", rclcpp::QoS(1).transient_local().reliable());
+    json_pub_ = this->create_publisher<std_msgs::msg::String>(
+        "skeleton_graph_json", rclcpp::QoS(1).transient_local().reliable());
 
     RCLCPP_INFO(this->get_logger(),
         "GraphGeneratorNode initialized, subscribing to %s", input_topic_.c_str());
@@ -91,8 +93,9 @@ void GraphGeneratorNode::costmapCallback(
       node_positions = builder.mergeCloseNodes(merge_threshold_pix_, types_to_merge);
     }
 
-    // Step 9: Publish graph visualization
+    // Step 9: Publish graph visualization and networkx as json string
     publishGraphMarkers(*msg, graph);
+    publishGraphJson(*msg, graph);
 
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
         "Graph: %zu nodes, %zu edges",
@@ -340,6 +343,48 @@ void GraphGeneratorNode::publishGraphMarkers(
     ma.markers.push_back(edge_marker);
 
     graph_marker_pub_->publish(ma);
+}
+
+void GraphGeneratorNode::publishGraphJson(const nav_msgs::msg::OccupancyGrid& base_grid, const std::shared_ptr<NetworkX>& graph) {
+    std_msgs::msg::String msg;
+    std::stringstream ss;
+    ss << "{\"directed\": false, \"multigraph\": false, \"graph\": {}, \"nodes\": [";
+    
+    bool first_node = true;
+    for (const auto& [nid, node] : graph->nodes()) {
+        if (!first_node) ss << ",";
+        geometry_msgs::msg::Point p = gridToWorld(base_grid, node.position.first, node.position.second);
+        ss << "{\"id\": " << nid << ", \"pos\": [" << p.x << ", " << p.y << "]}";
+        first_node = false;
+    }
+    
+    ss << "], \"links\": [";
+    bool first_edge = true;
+    std::unordered_set<std::string> seen;
+    
+    for (const auto& [nid, node] : graph->nodes()) {
+        try {
+            for (int nb : graph->getNeighbors(nid)) {
+                int u = std::min(nid, nb);
+                int v = std::max(nid, nb);
+                std::string key = std::to_string(u) + "_" + std::to_string(v);
+                
+                if (seen.count(key)) continue;
+                seen.insert(key);
+                
+                geometry_msgs::msg::Point p1 = gridToWorld(base_grid, graph->nodes().at(u).position.first, graph->nodes().at(u).position.second);
+                geometry_msgs::msg::Point p2 = gridToWorld(base_grid, graph->nodes().at(v).position.first, graph->nodes().at(v).position.second);
+                double weight = std::hypot(p1.x - p2.x, p1.y - p2.y);
+                
+                if (!first_edge) ss << ",";
+                ss << "{\"source\": " << u << ", \"target\": " << v << ", \"weight\": " << weight << "}";
+                first_edge = false;
+            }
+        } catch (...) {}
+    }
+    ss << "]}";
+    msg.data = ss.str();
+    json_pub_->publish(msg);
 }
 
 geometry_msgs::msg::Point GraphGeneratorNode::gridToWorld(

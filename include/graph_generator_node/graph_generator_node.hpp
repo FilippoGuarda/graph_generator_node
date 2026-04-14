@@ -7,6 +7,8 @@
 #include <opencv2/core.hpp>
 #include <memory>
 #include <mutex>
+#include <std_msgs/msg/string.hpp>
+#include <unordered_set>
 #include "skeleton_graph_builder.hpp"
 
 namespace graph_generator_node {
@@ -33,6 +35,8 @@ class GraphGeneratorNode : public rclcpp::Node {
   void publishEmptySkeleton(const nav_msgs::msg::OccupancyGrid& base_grid, const cv::Mat& skeleton);
   void publishGraphMarkers(const nav_msgs::msg::OccupancyGrid& base_grid,
                            const std::shared_ptr<NetworkX>& graph);
+  void publishGraphJson(const nav_msgs::msg::OccupancyGrid& base_grid,
+                           const std::shared_ptr<NetworkX>& graph);
 
   // Utilities
   geometry_msgs::msg::Point gridToWorld(
@@ -43,6 +47,7 @@ class GraphGeneratorNode : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr filtered_pub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr skeleton_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_marker_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr json_pub_;
 
   // Parameters
   std::string input_topic_;
