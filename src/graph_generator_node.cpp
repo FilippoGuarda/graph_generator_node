@@ -1,26 +1,39 @@
 #include "graph_generator_node/graph_generator_node.hpp"
 #include "graph_generator_node/skeleton_graph_builder.hpp"
+#include <opencv2/ximgproc.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
+
 #include <chrono>
+#include <cmath>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace {
+
+
+}// namespace
 
 namespace graph_generator_node {
 
 GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
     : Node("graph_generator_node", options) {
     // Parameters
-    input_topic_ = this->declare_parameter(
+    input_topic_ = this->declare_parameter<std::string>(
         "shared_costmap_topic", "/global_costmap");
-    global_frame_ = this->declare_parameter(
+    global_frame_ = this->declare_parameter<std::string>(
         "global_frame", "map");
-    obstacle_size_threshold_ = this->declare_parameter(
+    obstacle_size_threshold_ = this->declare_parameter<int>(
         "obstacle_size_threshold", 2);
-    max_bfs_steps_ = this->declare_parameter(
-        "max_bfs_steps", 100);
-    find_entrances_ = this->declare_parameter(
+    max_bfs_steps_ = this->declare_parameter<int>(
+        "max_bfs_steps", 1000);
+    hysteresis_ = this->declare_parameter<int>(
+        "hysteresis", 20);
+    find_entrances_ = this->declare_parameter<bool>(
         "find_entrances", true);
-    merge_threshold_pix_ = this->declare_parameter(
-        "merge_threshold_pix", 50.0);
+    robot_radius_ = this->declare_parameter<double>(
+        "robot_radius", 20.0);
 
     // Subscriptions
     costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -61,12 +74,55 @@ void GraphGeneratorNode::costmapCallback(
 
     // Step 3: Grid-FAST-like cleanup
     cv::Mat filtered = gridFastLikeCleanup(cleaned);
+    // filtered semantics: 0 = free, 255 = obstacle
 
-    // Step 4: Publish filtered map
-    publishFilteredMap(*msg, filtered);
+    // Step 4: Distance map on the original filtered map if you still need it elsewhere
+    cv::Mat distmap = computeDistanceMap(filtered);
 
-    // Step 5: Build skeleton
-    cv::Mat skeleton = buildSkeleton(filtered);
+    // Step 5: Build an explicit free-space mask for staggered point placement
+    // free_mask semantics: 255 = free, 0 = obstacle
+    cv::Mat free_mask = (filtered == 0);
+    // free_mask.convertTo(free_mask, CV_8U, 255);
+
+    // Step 6: Distance map in free space, used to decide where staggered points are valid
+    cv::Mat free_dist;
+    cv::distanceTransform(free_mask, free_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+
+    // Optional: suppress very narrow free-space regions before staggered carving
+    free_mask.setTo(0, free_dist < 5);
+
+    // Step 7: Apply staggered points INSIDE FREE SPACE
+    // addStaggeredPoints expects map=255 where valid space exists and writes 0 where points are carved
+    addStaggeredPoints(free_mask, free_dist, robot_radius_);
+
+    // Step 8: Recompute distance transform from the staggered free-space mask
+    cv::Mat map_lane_dist;
+    cv::distanceTransform(free_mask, map_lane_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+
+    // Define maximum inflation distance in pixels for the gradient fade.
+    // Replace 20.0f with your required radius (e.g., inflation_radius_meters / map_resolution)
+    const float max_dist_px = robot_radius_ * 2;
+
+    // Clamp the distances to max_dist_px
+    cv::Mat clamped_dist;
+    cv::min(map_lane_dist, max_dist_px, clamped_dist);
+
+    // Linearly scale from [0, max_dist_px] to cost [99, 0]
+    cv::Mat scaled_dist;
+    clamped_dist.convertTo(scaled_dist, CV_32F, -99.0 / max_dist_px, 99.0);
+
+    // Convert to 8-bit signed integers to match nav_msgs::msg::OccupancyGrid specification
+    cv::Mat dist_vis;
+    scaled_dist.convertTo(dist_vis, CV_8S);
+
+    // Override the exact obstacle cells to 100 (lethal obstacle)
+    dist_vis.setTo(100, map_lane_dist == 0.0f);
+
+    // Publish the map directly
+    publishFilteredMap(*msg, dist_vis);
+
+    // Step 9: Build skeleton from distance map
+    cv::Mat skeleton = buildSkeleton(map_lane_dist);
 
     if (cv::countNonZero(skeleton) == 0) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -75,25 +131,19 @@ void GraphGeneratorNode::costmapCallback(
         return;
     }
 
-    // Step 6: Publish skeleton
+    // Step 10: Publish skeleton
     publishSkeletonMap(*msg, skeleton);
 
-    // Step 7: Compute distance map (from obstacles, not skeleton)
-    cv::Mat distmap = computeDistanceMap(filtered);
-
-    // Step 8: Build graph using SkeletonGraphBuilder
+    // Continue with graph generation...
     SkeletonGraphBuilder builder(skeleton, distmap);
-    auto [graph, node_positions] = builder.buildGraph(
-        max_bfs_steps_,
-        find_entrances_);
+    auto [graph, node_positions] =
+        builder.buildGraph(max_bfs_steps_, hysteresis_, find_entrances_);
 
-    // Step 8b: Merge close nodes if threshold is set
-    if (merge_threshold_pix_ > 0.0) {
-      std::vector<std::string> types_to_merge = {"intersection", "entrance", "collision"};
-      node_positions = builder.mergeCloseNodes(merge_threshold_pix_, types_to_merge);
+    if (robot_radius_ > 0.0) {
+        std::vector<std::string> types_to_merge = {"intersection", "entrance", "collision"};
+        node_positions = builder.mergeCloseNodes(robot_radius_, types_to_merge);
     }
 
-    // Step 9: Publish graph visualization and networkx as json string
     publishGraphMarkers(*msg, graph);
     publishGraphJson(*msg, graph);
 
@@ -105,16 +155,28 @@ void GraphGeneratorNode::costmapCallback(
 void GraphGeneratorNode::publishFilteredMap(
     const nav_msgs::msg::OccupancyGrid& base_grid,
     const cv::Mat& filtered) {
-    nav_msgs::msg::OccupancyGrid filtered_msg = base_grid;
-    filtered_msg.data.assign(filtered_msg.data.size(), 0);
-
-    for (int y = 0; y < filtered.rows; ++y) {
-        const uint8_t* row = filtered.ptr<uint8_t>(y);
-        for (int x = 0; x < filtered.cols; ++x) {
-            int idx = y * filtered.cols + x;
-            filtered_msg.data[idx] = (row[x] != 0) ? 100 : 0;
-        }
+    
+    // Ensure the input matrix is continuous and signed 8-bit to match ROS specifications
+    cv::Mat continuous_filtered;
+    if (filtered.type() != CV_8S) {
+        filtered.convertTo(continuous_filtered, CV_8S);
+    } else {
+        continuous_filtered = filtered;
     }
+    
+    if (!continuous_filtered.isContinuous()) {
+        continuous_filtered = continuous_filtered.clone();
+    }
+
+    nav_msgs::msg::OccupancyGrid filtered_msg = base_grid;
+    
+    // Directly copy the gradient data into the message vector
+    size_t data_size = continuous_filtered.total();
+    filtered_msg.data.assign(
+        continuous_filtered.ptr<int8_t>(),
+        continuous_filtered.ptr<int8_t>() + data_size
+    );
+
     filtered_pub_->publish(filtered_msg);
 }
 
@@ -151,11 +213,10 @@ cv::Mat GraphGeneratorNode::costmapToBinary(
         for (int x = 0; x < static_cast<int>(grid.info.width); ++x) {
             int idx = y * grid.info.width + x;
             int8_t v = grid.data[idx];
-            // -1 (unknown) and 50+ (occupied) -> 255 (obstacle)
             if (v == -1 || v >= 70) {
                 row[x] = 255;
             } else {
-                row[x] = 0; // Free
+                row[x] = 0;
             }
         }
     }
@@ -200,80 +261,106 @@ cv::Mat GraphGeneratorNode::gridFastLikeCleanup(const cv::Mat& cleaned_map) {
 }
 
 cv::Mat GraphGeneratorNode::buildSkeleton(const cv::Mat& filtered_map) {
-    cv::Mat bin;
-    cv::threshold(filtered_map, bin, 127, 255, cv::THRESH_BINARY_INV);
+
+    cv::Mat momentum_skeleton = momentumFieldSkeleton(filtered_map, 5.0);
+
     cv::Mat skeleton;
-    thinning(bin, skeleton);
+    cv::ximgproc::thinning(momentum_skeleton, skeleton, cv::ximgproc::THINNING_ZHANGSUEN);
+
     return skeleton;
 }
 
-void GraphGeneratorNode::thinning(const cv::Mat& src, cv::Mat& dst) {
-    dst = src.clone();
-    dst.convertTo(dst, CV_8U);
-    dst = dst / 255; // Convert to 01: 1 = skeleton, 0 = background
+cv::Mat GraphGeneratorNode::removeUnconnectedBranches(const cv::Mat& skeleton) {
+    cv::Mat skel_u8;
+    if (skeleton.type() != CV_8U) {
+        skeleton.convertTo(skel_u8, CV_8U);
+    } else {
+        skel_u8 = skeleton.clone();
+    }
 
-    cv::Mat prev = cv::Mat::zeros(dst.size(), CV_8U);
-    cv::Mat marker = cv::Mat::zeros(dst.size(), CV_8U);
+    cv::Mat binary = skel_u8 != 0;
 
-    while (true) {
-        dst.copyTo(prev);
+    cv::Mat labels, stats, centroids;
+    int num_labels = cv::connectedComponentsWithStats(binary, labels, stats, centroids, 8, CV_32S);
+    if (num_labels <= 1) {
+        return skel_u8;
+    }
 
-        // Iteration 1 and 2 for skeleton thinning
-        for (int iter = 0; iter < 2; ++iter) {
-            marker.setTo(0);
-            
-            for (int r = 1; r < dst.rows - 1; ++r) {
-                const uchar* prev_row = dst.ptr<uchar>(r - 1);
-                const uchar* curr_row = dst.ptr<uchar>(r);
-                const uchar* next_row = dst.ptr<uchar>(r + 1);
-                uchar* marker_row = marker.ptr<uchar>(r);
-
-                for (int c = 1; c < dst.cols - 1; ++c) {
-                    // 3x3 neighborhood
-                    int p2 = prev_row[c], p3 = prev_row[c + 1],
-                        p4 = curr_row[c + 1], p5 = next_row[c + 1],
-                        p6 = next_row[c], p7 = next_row[c - 1],
-                        p8 = curr_row[c - 1], p9 = prev_row[c - 1];
-
-                    int A = (p2 == 0 && p3 == 1) + (p3 == 0 && p4 == 1) +
-                            (p4 == 0 && p5 == 1) + (p5 == 0 && p6 == 1) +
-                            (p6 == 0 && p7 == 1) + (p7 == 0 && p8 == 1) +
-                            (p8 == 0 && p9 == 1) + (p9 == 0 && p2 == 1);
-                    int B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-                    int m1 = (iter == 0) ? (p2 * p4 * p6) : (p2 * p4 * p8);
-                    int m2 = (iter == 0) ? (p4 * p6 * p8) : (p2 * p6 * p8);
-
-                    if (A == 1 && B >= 2 && B <= 6 && m1 == 0 && m2 == 0) {
-                        marker_row[c] = 1;
-                    }
-                }
-            }
-            // Remove marked pixels
-            for(int r=0; r<dst.rows; ++r) {
-                uchar* d = dst.ptr<uchar>(r);
-                const uchar* m = marker.ptr<uchar>(r);
-                for(int c=0; c<dst.cols; ++c) {
-                    if(m[c]) d[c] = 0;
-                }
-            }
-        }
-
-        cv::Mat diff;
-        cv::absdiff(dst, prev, diff);
-        if (cv::countNonZero(diff) == 0) {
-            break;
+    int largest_label = 1;
+    int largest_area = stats.at<int>(1, cv::CC_STAT_AREA);
+    for (int label = 2; label < num_labels; ++label) {
+        int area = stats.at<int>(label, cv::CC_STAT_AREA);
+        if (area > largest_area) {
+            largest_area = area;
+            largest_label = label;
         }
     }
 
-    dst = dst * 255; // Convert back to 255 = skeleton
+    cv::Mat cleaned = (labels == largest_label);
+    cleaned.convertTo(cleaned, CV_8U, 255);
+    return cleaned;
+}
+
+void GraphGeneratorNode::addStaggeredPoints(cv::Mat& map, const cv::Mat& dist_map, double robot_size) {
+    int h = map.rows;
+    int w = map.cols;
+
+    int scaled_robot_size = static_cast<int>(robot_size * 2.0 / std::sqrt(3.0));
+
+    int spacing_x = scaled_robot_size;
+    int spacing_y = static_cast<int>(scaled_robot_size * std::sqrt(3.0) / 2.0);
+
+    int row = 0;
+    int column = 0;
+    for (int y = 0; y < h; y += spacing_y) {
+        int offset = (row % 2 == 0) ? 0 : spacing_x / 2;
+        for (int x = offset; x < w; x += spacing_x) {
+            float d = dist_map.at<float>(y, x);
+            if (d > static_cast<float>(scaled_robot_size)) {
+                map.at<uint8_t>(y, x) = 0;
+            }
+            column += 1;
+        }
+        column = 0;
+        row += 1;
+    }
+}
+
+cv::Mat GraphGeneratorNode::momentumFieldSkeleton(const cv::Mat& dist_transform, double threshold = 2.0) {
+    cv::Mat dist_f;
+    dist_transform.convertTo(dist_f, CV_64F);
+
+
+    cv::Mat grad_x, grad_y;
+    cv::Sobel(dist_f, grad_x, CV_64F, 1, 0, 3);
+    cv::Sobel(dist_f, grad_y, CV_64F, 0, 1, 3);
+
+    grad_x = -grad_x;
+    grad_y = -grad_y;
+
+    cv::Mat grad_magnitude;
+    cv::magnitude(grad_x, grad_y, grad_magnitude);
+
+    cv::Mat velocity_x = grad_x / (grad_magnitude + 1e-8);
+    cv::Mat velocity_y = grad_y / (grad_magnitude + 1e-8);
+
+    cv::Mat momentum_x = velocity_x.mul(dist_f);
+    cv::Mat momentum_y = velocity_y.mul(dist_f);
+
+
+    cv::Mat dmx_dx, dmy_dy;
+    cv::Sobel(momentum_x, dmx_dx, CV_64F, 1, 0, 3);
+    cv::Sobel(momentum_y, dmy_dy, CV_64F, 0, 1, 3);
+
+    cv::Mat divergence = dmx_dx + dmy_dy;
+
+    cv::Mat skeleton = divergence > threshold;
+    skeleton.convertTo(skeleton, CV_8U, 255);
+
+    return skeleton;
 }
 
 cv::Mat GraphGeneratorNode::computeDistanceMap(const cv::Mat& obstacle_map) {
-    // obstacle_map: 255=Obstacle, 0=Free
-    // We want distance TO the nearest obstacle
-    // distanceTransform calculates distance to nearest ZERO pixel
-    // So invert: Obstacles(255)->0, Free(0)->255
-    
     cv::Mat inv_obstacles;
     cv::threshold(obstacle_map, inv_obstacles, 0, 255, cv::THRESH_BINARY_INV);
 
@@ -291,7 +378,6 @@ void GraphGeneratorNode::publishGraphMarkers(
     visualization_msgs::msg::MarkerArray ma;
     rclcpp::Time stamp = this->get_clock()->now();
 
-    // Nodes as SPHERE_LIST
     visualization_msgs::msg::Marker node_marker;
     node_marker.header.frame_id = base_grid.header.frame_id;
     node_marker.header.stamp = stamp;
@@ -313,7 +399,6 @@ void GraphGeneratorNode::publishGraphMarkers(
     }
     ma.markers.push_back(node_marker);
 
-    // Edges as LINE_LIST
     visualization_msgs::msg::Marker edge_marker;
     edge_marker.header.frame_id = base_grid.header.frame_id;
     edge_marker.header.stamp = stamp;
@@ -331,13 +416,13 @@ void GraphGeneratorNode::publishGraphMarkers(
         if (edge.path_pixels.size() < 2) continue;
         for (size_t i = 1; i < edge.path_pixels.size(); ++i) {
             geometry_msgs::msg::Point p1 = gridToWorld(base_grid,
-            edge.path_pixels[i - 1].first,    // ← .first not .x
-            edge.path_pixels[i - 1].second);  // ← .second not .y
+                edge.path_pixels[i - 1].first,
+                edge.path_pixels[i - 1].second);
             geometry_msgs::msg::Point p2 = gridToWorld(base_grid,
-            edge.path_pixels[i].first,        // ← .first not .x
-            edge.path_pixels[i].second);      // ← .second not .y
-            edge_marker.points.push_back(p1);   // ← edge_marker not edgemarker
-            edge_marker.points.push_back(p2);   // ← edge_marker not edgemarker
+                edge.path_pixels[i].first,
+                edge.path_pixels[i].second);
+            edge_marker.points.push_back(p1);
+            edge_marker.points.push_back(p2);
         }
     }
     ma.markers.push_back(edge_marker);
@@ -349,7 +434,7 @@ void GraphGeneratorNode::publishGraphJson(const nav_msgs::msg::OccupancyGrid& ba
     std_msgs::msg::String msg;
     std::stringstream ss;
     ss << "{\"directed\": false, \"multigraph\": false, \"graph\": {}, \"nodes\": [";
-    
+
     bool first_node = true;
     for (const auto& [nid, node] : graph->nodes()) {
         if (!first_node) ss << ",";
@@ -357,31 +442,32 @@ void GraphGeneratorNode::publishGraphJson(const nav_msgs::msg::OccupancyGrid& ba
         ss << "{\"id\": " << nid << ", \"pos\": [" << p.x << ", " << p.y << "]}";
         first_node = false;
     }
-    
+
     ss << "], \"links\": [";
     bool first_edge = true;
     std::unordered_set<std::string> seen;
-    
+
     for (const auto& [nid, node] : graph->nodes()) {
         try {
             for (int nb : graph->getNeighbors(nid)) {
                 int u = std::min(nid, nb);
                 int v = std::max(nid, nb);
                 std::string key = std::to_string(u) + "_" + std::to_string(v);
-                
+
                 if (seen.count(key)) continue;
                 seen.insert(key);
-                
+
                 geometry_msgs::msg::Point p1 = gridToWorld(base_grid, graph->nodes().at(u).position.first, graph->nodes().at(u).position.second);
                 geometry_msgs::msg::Point p2 = gridToWorld(base_grid, graph->nodes().at(v).position.first, graph->nodes().at(v).position.second);
                 double weight = std::hypot(p1.x - p2.x, p1.y - p2.y);
-                
+
                 if (!first_edge) ss << ",";
                 ss << "{\"source\": " << u << ", \"target\": " << v << ", \"weight\": " << weight << "}";
                 first_edge = false;
             }
         } catch (...) {}
     }
+
     ss << "]}";
     msg.data = ss.str();
     json_pub_->publish(msg);

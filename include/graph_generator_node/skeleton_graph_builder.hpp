@@ -1,11 +1,11 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
-#include <unordered_map>
-#include <vector>
-#include <tuple>
 #include <memory>
+#include <vector>
 #include <queue>
+#include <unordered_map>
+#include <rclcpp/rclcpp.hpp> 
 #include "network_x.hpp"
 
 namespace graph_generator_node {
@@ -21,13 +21,13 @@ namespace graph_generator_node {
  * - Adaptive merging of close nodes with connectivity checks
  */
 class SkeletonGraphBuilder {
- public:
+public:
   /**
    * @brief Constructor
    * @param skeleton Binary skeleton image (H×W, 0=background, >0=skeleton)
    * @param distmap Distance transform of skeleton for narrowness estimation
    */
-  SkeletonGraphBuilder(const cv::Mat& skeleton, const cv::Mat& distmap);
+    SkeletonGraphBuilder(const cv::Mat& skeleton, const cv::Mat& distmap);
 
   /**
    * @brief Build graph from skeleton with multi-source BFS
@@ -43,8 +43,8 @@ class SkeletonGraphBuilder {
    * @param find_entrances Create entrance nodes at budget boundaries (default: true)
    * @return Pair of (graph pointer, node_positions_map)
    */
-  std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
-  buildGraph(int max_steps = 100, bool find_entrances = true);
+    std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
+    buildGraph(int max_steps = 100, int hysteresis = 20, bool find_entrances = true);
 
   /**
    * @brief Merge nodes within distance threshold
@@ -60,20 +60,17 @@ class SkeletonGraphBuilder {
    * @param node_types_to_merge Which node types to consider (default: all except endpoints)
    * @return Updated node positions map after merging
    */
-  std::unordered_map<int, std::pair<int, int>>
-  mergeCloseNodes(double distance_threshold,
-                  const std::vector<std::string>& node_types_to_merge = {});
+    std::unordered_map<int, std::pair<int, int>>
+    mergeCloseNodes(double distance_threshold, const std::vector<std::string>& node_types_to_merge = {});
 
- private:
-  // Input data
-  cv::Mat skeleton_;
-  cv::Mat distmap_;
-  int height_;
-  int width_;
+private:
+    cv::Mat skeleton_;
+    cv::Mat distmap_;
+    int height_;
+    int width_;
 
-  // Graph state
-  std::shared_ptr<NetworkX> graph_;
-  int next_node_id_;
+    std::shared_ptr<NetworkX> graph_;
+    int next_node_id_;
 
   // ===== Private Methods =====
 
@@ -83,11 +80,12 @@ class SkeletonGraphBuilder {
    * Each source propagates with its budget. When budgets exhaust simultaneously,
    * collision nodes are created. Entrances mark budget-only boundaries.
    */
-  void buildGraphMultiSourceBFS(
-      const std::unordered_map<int, std::pair<int, int>>& intersection_positions,
-      const std::unordered_map<int, std::pair<int, int>>& endpoint_positions,
-      bool find_entrances,
-      int max_steps);
+    void buildGraphMultiSourceBFS(
+        const std::unordered_map<int, std::pair<int, int>>& intersection_positions,
+        const std::unordered_map<int, std::pair<int, int>>& endpoint_positions,
+        bool find_entrances,
+        int max_steps,
+        int hysteresis);
 
   /**
    * @brief Execute multi-source BFS from queue
@@ -97,17 +95,19 @@ class SkeletonGraphBuilder {
    * @param visited_dist Map of (x, y) -> distance from source to that pixel
    * @param parent_data Vector-indexed parent tracking: parent_data[y*width + x] = (px, py)
    * @param find_entrances Create entrance nodes at budget boundaries
+   * @param hysteresis Budget hysteresis (default: 20)
    * @param max_steps Global maximum budget (for collision node propagation)
    */
-  void executeBFS(
-      std::queue<std::tuple<int, int, int, int>>& queue,
-      cv::Mat& visited_src,
-      cv::Mat& visited_dist,
-      std::vector<std::pair<int, int>>& parent_data,
-      bool find_entrances,
-      int max_steps);
+    void executeBFS(
+        std::queue<std::tuple<int, int, int, int, bool>>& queue,
+        cv::Mat& visited_src,
+        cv::Mat& visited_dist,
+        std::vector<std::pair<int, int>>& parent_data,
+        bool find_entrances,
+        int max_steps,
+        int hysteresis);
 
-  /**
+      /**
    * @brief Create entrance node at budget boundary
    * @param p Pixel coordinates where entrance is created
    * @param parent_src_id Source ID that created this entrance
@@ -118,7 +118,7 @@ class SkeletonGraphBuilder {
                          int parent_src_id,
                          std::vector<std::pair<int, int>>& parent_data);
 
-  /**
+    /**
    * @brief Create collision node where two sources meet with exhausted budgets
    * @param p Collision point coordinates
    * @param src1 First source ID
@@ -131,7 +131,7 @@ class SkeletonGraphBuilder {
                           int src2,
                           std::vector<std::pair<int, int>>& parent_data);
 
-  /**
+      /**
    * @brief Reconstruct path from pixel back to source by following parent pointers
    * @param p End point (x, y)
    * @param src_id Source ID (not used in this implementation, for API compatibility)
@@ -143,7 +143,7 @@ class SkeletonGraphBuilder {
       int src_id,
       const std::vector<std::pair<int, int>>& parent_data);
 
-  /**
+    /**
    * @brief Reconstruct path when two sources collide
    * Combines path from first source backward to collision point
    * with path from second source backward to collision point
@@ -167,14 +167,14 @@ class SkeletonGraphBuilder {
    * @param[out] intersections_mask Binary mask of intersection points
    * @param[out] endpoints_mask Binary mask of endpoint points
    */
-  void findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask);
+    void findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask);
 
-  /**
+    /**
    * @brief Extract (x, y) coordinates from binary mask
    * @param mask Binary mask where non-zero pixels are selected
    * @return Vector of (x, y) coordinates for each selected pixel
    */
-  std::vector<cv::Point2i> extractCoordsFromMask(const cv::Mat& mask);
+    std::vector<cv::Point2i> extractCoordsFromMask(const cv::Mat& mask);
 
   /**
    * @brief Get 8-connected neighbors of a pixel
@@ -182,7 +182,7 @@ class SkeletonGraphBuilder {
    * @param y Y coordinate
    * @return Vector of 8 neighboring (x, y) positions (with bounds checking)
    */
-  std::vector<cv::Point2i> neighbors8(int x, int y);
+    std::vector<cv::Point2i> neighbors8(int x, int y);
 
   /**
    * @brief Snap a point to nearest skeleton pixel using spiral search
@@ -191,7 +191,7 @@ class SkeletonGraphBuilder {
    * @param max_search_radius Maximum search radius in pixels
    * @return (x, y) coordinates of snapped point on skeleton, or clamped original if not found
    */
-  std::pair<int, int> snapToSkeleton(int x, int y, int max_search_radius = 10);
+    std::pair<int, int> snapToSkeleton(int x, int y, int max_search_radius = 10);
 
   /**
    * @brief Pack three integers into a single 64-bit key
@@ -201,7 +201,15 @@ class SkeletonGraphBuilder {
    * @param y Y coordinate
    * @return Packed 64-bit key
    */
-  long long packKey(int src_id, int x, int y);
+    long long packKey(int src_id, int x, int y);
+
+  /**
+   * @brief Prune branches shorter than max_length from skeleton
+   * @param max_length Maximum path length to keep
+   * @return Skeleton with removed unconnected branches
+   */
+    void pruneShortBranches(int max_length);
+
 };
 
-}  // namespace graph_generator_node
+} // namespace graph_generator_node
