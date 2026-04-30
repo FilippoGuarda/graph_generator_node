@@ -26,10 +26,12 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
         "global_frame", "map");
     obstacle_size_threshold_ = this->declare_parameter<int>(
         "obstacle_size_threshold", 2);
+    skeleton_threshold_ = this->declare_parameter<int>(
+        "skeleton_threshold", 10);
     max_bfs_steps_ = this->declare_parameter<int>(
         "max_bfs_steps", 1000);
     hysteresis_ = this->declare_parameter<int>(
-        "hysteresis", 20);
+        "hysteresis", 5);
     find_entrances_ = this->declare_parameter<bool>(
         "find_entrances", true);
     robot_radius_ = this->declare_parameter<double>(
@@ -88,9 +90,6 @@ void GraphGeneratorNode::costmapCallback(
     cv::Mat free_dist;
     cv::distanceTransform(free_mask, free_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
 
-    // Optional: suppress very narrow free-space regions before staggered carving
-    free_mask.setTo(0, free_dist < 5);
-
     // Step 7: Apply staggered points INSIDE FREE SPACE
     // addStaggeredPoints expects map=255 where valid space exists and writes 0 where points are carved
     addStaggeredPoints(free_mask, free_dist, robot_radius_);
@@ -124,6 +123,8 @@ void GraphGeneratorNode::costmapCallback(
     // Step 9: Build skeleton from distance map
     cv::Mat skeleton = buildSkeleton(map_lane_dist);
 
+    skeleton = removeUnconnectedBranches(skeleton);
+
     if (cv::countNonZero(skeleton) == 0) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
             "Empty skeleton generated - map may be too cluttered");
@@ -139,10 +140,10 @@ void GraphGeneratorNode::costmapCallback(
     auto [graph, node_positions] =
         builder.buildGraph(max_bfs_steps_, hysteresis_, find_entrances_);
 
-    if (robot_radius_ > 0.0) {
-        std::vector<std::string> types_to_merge = {"intersection", "entrance", "collision"};
-        node_positions = builder.mergeCloseNodes(robot_radius_, types_to_merge);
-    }
+    // if (robot_radius_ > 0.0) {
+    //     std::vector<std::string> types_to_merge = {"intersection", "enpoint", "collision"};
+    //     node_positions = builder.mergeCloseNodes(robot_radius_ /2 , types_to_merge);
+    // }
 
     publishGraphMarkers(*msg, graph);
     publishGraphJson(*msg, graph);
@@ -262,7 +263,7 @@ cv::Mat GraphGeneratorNode::gridFastLikeCleanup(const cv::Mat& cleaned_map) {
 
 cv::Mat GraphGeneratorNode::buildSkeleton(const cv::Mat& filtered_map) {
 
-    cv::Mat momentum_skeleton = momentumFieldSkeleton(filtered_map, 5.0);
+    cv::Mat momentum_skeleton = momentumFieldSkeleton(filtered_map, skeleton_threshold_);
 
     cv::Mat skeleton;
     cv::ximgproc::thinning(momentum_skeleton, skeleton, cv::ximgproc::THINNING_ZHANGSUEN);
@@ -270,6 +271,7 @@ cv::Mat GraphGeneratorNode::buildSkeleton(const cv::Mat& filtered_map) {
     return skeleton;
 }
 
+// Optional: remove unconnected branches from skeleton
 cv::Mat GraphGeneratorNode::removeUnconnectedBranches(const cv::Mat& skeleton) {
     cv::Mat skel_u8;
     if (skeleton.type() != CV_8U) {
@@ -301,6 +303,7 @@ cv::Mat GraphGeneratorNode::removeUnconnectedBranches(const cv::Mat& skeleton) {
     return cleaned;
 }
 
+// Used to add points to obstacle map, creates an exagonal pattern that is stable trough time
 void GraphGeneratorNode::addStaggeredPoints(cv::Mat& map, const cv::Mat& dist_map, double robot_size) {
     int h = map.rows;
     int w = map.cols;

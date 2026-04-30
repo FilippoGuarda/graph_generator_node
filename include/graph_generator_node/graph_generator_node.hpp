@@ -57,6 +57,7 @@ private:
     int obstacle_size_threshold_;
     int max_bfs_steps_;
     int hysteresis_;
+    int skeleton_threshold_;
     bool find_entrances_;
     double robot_radius_;
 

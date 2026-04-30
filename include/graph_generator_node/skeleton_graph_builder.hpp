@@ -194,6 +194,15 @@ private:
     std::pair<int, int> snapToSkeleton(int x, int y, int max_search_radius = 10);
 
   /**
+   * @brief Find skeleton path between two points using BFS
+   * @param start_pos Starting point (x, y)
+   * @param end_pos Ending point (x, y)
+   * @return Vector of (x, y) points along the path
+   */
+    std::vector<std::pair<int, int>> findSkeletonPath(
+    std::pair<int, int> start_pos, 
+    std::pair<int, int> end_pos);
+  /**
    * @brief Pack three integers into a single 64-bit key
    * Used for parent tracking in legacy code (now replaced by vector indexing)
    * @param src_id Source ID

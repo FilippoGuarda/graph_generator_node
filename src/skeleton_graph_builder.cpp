@@ -68,7 +68,7 @@ SkeletonGraphBuilder::buildGraph(int max_steps, int hysteresis, bool find_entran
     node_positions[nid] = node.position;
   }
 
-  // pruneShortBranches(hysteresis);
+  pruneShortBranches(hysteresis);
 
   RCLCPP_DEBUG(LOGGER, "Finished. Graph nodes: %zu, Edges: %zu", graph_->nodes().size(), graph_->edges().size());
 
@@ -368,386 +368,301 @@ std::vector<cv::Point2i> SkeletonGraphBuilder::reconstructPathCollision(
 std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNodes(
     double distance_threshold,
     const std::vector<std::string>& node_types_to_merge) {
+
   std::unordered_map<int, std::pair<int, int>> result;
+  if (distance_threshold <= 0.0) goto end_merge;
 
-  // SAFETY CHECK 1: Validate threshold
-  if (distance_threshold <= 0.0) {
-    RCLCPP_DEBUG(LOGGER, "Merge threshold <= 0, skipping merge.");
+  {
+    // 1. Determine node types (default to intersection and endpoint)
+    std::vector<std::string> types = node_types_to_merge.empty() ? 
+        std::vector<std::string>{"intersection", "endpoint"} : node_types_to_merge;
+
+    std::vector<int> nodes;
     for (const auto& [nid, node] : graph_->nodes()) {
-      result[nid] = node.position;
-    }
-    return result;
-  }
-
-  // Determine node types to merge
-  std::vector<std::string> types_to_merge = node_types_to_merge;
-  if (types_to_merge.empty()) {
-    types_to_merge = {"intersection", "entrance"};
-  }
-
-  // OPTIMIZATION: Collect nodes AND precompute type flags for O(1) comparison
-  std::vector<int> nodes_to_check;
-  std::unordered_map<int, uint8_t> node_type_flags; // Bitmask: intersection=1, entrance=2, collision=4
-
-  nodes_to_check.reserve(graph_->nodes().size());
-
-  for (const auto& [nid, node] : graph_->nodes()) {
-    for (const auto& t : types_to_merge) {
-      if (node.type == t) {
-        nodes_to_check.push_back(nid);
-
-        // Precompute type flag
-        if (node.type == "intersection")
-          node_type_flags[nid] = 1;
-        else if (node.type == "entrance")
-          node_type_flags[nid] = 2;
-        else if (node.type == "collision")
-          node_type_flags[nid] = 4;
-
-        break;
+      if (std::find(types.begin(), types.end(), node.type) != types.end()) {
+        nodes.push_back(nid);
       }
     }
-  }
+    if (nodes.size() < 2) goto end_merge;
 
-  // SAFETY CHECK 2: Minimum nodes
-  if (nodes_to_check.size() < 2) {
-    RCLCPP_DEBUG(LOGGER, "Less than 2 nodes to merge, skipping.");
-    for (const auto& [nid, node] : graph_->nodes()) {
-      result[nid] = node.position;
-    }
-    return result;
-  }
+    // 2. Purely Spatial Union-Find
+    std::unordered_map<int, int> parent;
+    for (int id : nodes) parent[id] = id;
+    std::function<int(int)> find_root = [&](int x) {
+      return parent[x] == x ? x : (parent[x] = find_root(parent[x]));
+    };
 
-  RCLCPP_DEBUG(LOGGER, "Merging with EUCLIDEAN + CONNECTIVITY threshold %f, checking %zu nodes.",
-               distance_threshold, nodes_to_check.size());
-
-  // OPTIMIZATION: Build adjacency cache for O(1) connectivity checks
-  std::unordered_set<long long> edge_cache;
-  for (const auto& [nid, node] : graph_->nodes()) {
-    for (int nb : graph_->getNeighbors(nid)) {
-      int u = std::min(nid, nb);
-      int v = std::max(nid, nb);
-      edge_cache.insert((static_cast<long long>(u) << 32) | static_cast<long long>(v));
-    }
-  }
-
-  auto has_edge_cached = [&](int n1, int n2) -> bool {
-    int u = std::min(n1, n2);
-    int v = std::max(n1, n2);
-    return edge_cache.count((static_cast<long long>(u) << 32) | static_cast<long long>(v)) > 0;
-  };
-
-  // Build position array
-  std::vector<std::pair<int, int>> positions;
-  positions.reserve(nodes_to_check.size());
-  for (int nid : nodes_to_check) {
-    positions.push_back(graph_->nodes().at(nid).position);
-  }
-
-  // Union-find
-  std::unordered_map<int, int> parent;
-  parent.reserve(nodes_to_check.size());
-  for (int id : nodes_to_check) parent[id] = id;
-
-  std::function<int(int)> find_root = [&](int x) -> int {
-    auto it = parent.find(x);
-    if (it == parent.end()) return x;
-    if (it->second != x) it->second = find_root(it->second);
-    return it->second;
-  };
-
-  auto unite = [&](int a, int b) {
-    int ra = find_root(a);
-    int rb = find_root(b);
-    if (ra != rb) parent[ra] = rb;
-  };
-
-  // OPTIMIZATION: Euclidean distance + connectivity check
-  auto euclidean = [&](size_t i, size_t j) -> double {
-    double dx = positions[i].first - positions[j].first;
-    double dy = positions[i].second - positions[j].second;
-    return std::sqrt(dx * dx + dy * dy);
-  };
-
-  auto types_compatible = [&](uint8_t t1, uint8_t t2) -> bool {
-    // intersection (1) + intersection (1) = OK
-    if ((t1 & 1) && (t2 & 1)) return true;
-    // entrance (2) or collision (4) mix = OK
-    if ((t1 & 6) && (t2 & 6)) return true;
-    return false;
-  };
-
-  int num_connected_pairs = 0;
-  int num_merged_pairs = 0;
-
-  for (size_t i = 0; i < nodes_to_check.size(); ++i) {
-    int n1 = nodes_to_check[i];
-
-    for (size_t j = i + 1; j < nodes_to_check.size(); ++j) {
-      int n2 = nodes_to_check[j];
-
-      // CRITICAL: Check connectivity from cache (O(1))
-      if (!has_edge_cached(n1, n2)) {
-        continue;
-      }
-
-      num_connected_pairs++;
-
-      double d = euclidean(i, j);
-      if (d <= distance_threshold) {
-        num_merged_pairs++;
-
-        // Check type compatibility (O(1) with precomputed flags)
-        uint8_t t1 = node_type_flags[n1];
-        uint8_t t2 = node_type_flags[n2];
-
-        if (types_compatible(t1, t2)) {
-          unite(n1, n2);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+      for (size_t j = i + 1; j < nodes.size(); ++j) {
+        auto p1 = graph_->nodes().at(nodes[i]).position;
+        auto p2 = graph_->nodes().at(nodes[j]).position;
+        if (std::hypot(p1.first - p2.first, p1.second - p2.second) <= distance_threshold) {
+          parent[find_root(nodes[i])] = find_root(nodes[j]);
         }
       }
     }
-  }
 
-  RCLCPP_DEBUG(LOGGER, "Found %d connected node pairs, %d within distance threshold.", 
-               num_connected_pairs, num_merged_pairs);
+    // 3. Process Clusters
+    std::unordered_map<int, std::vector<int>> clusters;
+    for (int nid : nodes) clusters[find_root(nid)].push_back(nid);
 
-  // Group nodes by cluster root
-  std::unordered_map<int, std::vector<int>> clusters;
-  clusters.reserve(nodes_to_check.size());
+    for (const auto& [root, cluster] : clusters) {
+      if (cluster.size() <= 1) continue;
 
-  for (int node_id : nodes_to_check) {
-    int r = find_root(node_id);
-    clusters[r].push_back(node_id);
-  }
+      double bx = 0, by = 0;
+      std::unordered_map<std::string, int> type_counts;
+      std::unordered_set<int> external_neighbors;
 
-  RCLCPP_DEBUG(LOGGER, "Found %zu clusters.", clusters.size());
-
-  std::unordered_set<int> nodes_to_remove;
-  int num_merged = 0;
-
-  for (const auto& [root, cluster] : clusters) {
-    if (cluster.size() <= 1) continue;
-
-    num_merged++;
-
-    // Compute barycenter
-    double bx = 0.0, by = 0.0;
-    int cnt = 0;
-
-    for (int node_id : cluster) {
-      auto itn = graph_->nodes().find(node_id);
-      if (itn == graph_->nodes().end()) continue;
-
-      bx += itn->second.position.first;
-      by += itn->second.position.second;
-      cnt++;
-    }
-
-    if (cnt == 0) continue;
-
-    bx /= cnt;
-    by /= cnt;
-
-    int gx = static_cast<int>(std::round(bx));
-    int gy = static_cast<int>(std::round(by));
-
-    auto [snapx, snapy] = snapToSkeleton(gx, gy, 10);
-
-    // Validate snap
-    if (snapx < 0 || snapx >= width_ || snapy < 0 || snapy >= height_) {
-      RCLCPP_WARN(LOGGER, "Snap out of bounds (%d, %d), skipping cluster.", snapx, snapy);
-      continue;
-    }
-
-    if (skeleton_.at<uint8_t>(snapy, snapx) == 0) {
-      RCLCPP_WARN(LOGGER, "Snap not on skeleton at (%d, %d), skipping cluster.", snapx, snapy);
-      continue;
-    }
-
-    // Create merged node
-    int merged_id = next_node_id_++;
-    std::string merged_type = "intersection";
-
-    // Check if this cluster contains entrance/collision nodes
-    bool is_entrance_group = false;
-    for (int id : cluster) {
-      std::string t = graph_->nodes().at(id).type;
-      if (t == "entrance" || t == "collision") {
-        is_entrance_group = true;
-        break;
-      }
-    }
-
-    if (is_entrance_group) {
-      merged_type = "entrance";
-    }
-
-    graph_->addNode(merged_id, {snapx, snapy}, merged_type);
-
-    // Find external neighbors
-    std::unordered_set<int> external_neighbors;
-
-    for (int node_id : cluster) {
-      try {
-        for (int nb : graph_->getNeighbors(node_id)) {
+      // Accumulate cluster data
+      for (int nid : cluster) {
+        const auto& n = graph_->nodes().at(nid);
+        bx += n.position.first;
+        by += n.position.second;
+        type_counts[n.type]++;
+        
+        for (int nb : graph_->getNeighbors(nid)) {
           if (std::find(cluster.begin(), cluster.end(), nb) == cluster.end()) {
             external_neighbors.insert(nb);
           }
         }
-      } catch (...) {
       }
-    }
 
-    // Reconnect to external neighbors using best edge from cluster
-    for (int nb : external_neighbors) {
-      if (graph_->nodes().find(nb) == graph_->nodes().end()) continue;
+      // Majority vote for merged node type
+      std::string merged_type;
+      int max_count = -1;
+      for (const auto& [t, c] : type_counts) {
+        if (c > max_count) { max_count = c; merged_type = t; }
+      }
 
-      double best_w = std::numeric_limits<double>::infinity();
-      std::vector<std::pair<int, int>> best_path;
-      bool found = false;
+      // Snap barycenter (using max_search_radius=5 matching Python)
+      auto [snapx, snapy] = snapToSkeleton(std::round(bx / cluster.size()), std::round(by / cluster.size()), 5);
 
-      for (int node_id : cluster) {
-        if (graph_->nodes().find(node_id) == graph_->nodes().end()) continue;
+      int merged_id = next_node_id_++;
+      graph_->addNode(merged_id, {snapx, snapy}, merged_type);
 
-        const auto e_fwd = graph_->getEdge(node_id, nb);
-        const auto e_bwd = graph_->getEdge(nb, node_id);
+      // Reconnect external neighbors
+      for (int nb : external_neighbors) {
+        auto nb_pos = graph_->nodes().at(nb).position;
+        
+        // CRITICAL FIX: Attempt new BFS path first
+        std::vector<std::pair<int, int>> new_path = findSkeletonPath({snapx, snapy}, nb_pos);
 
-        if (e_fwd && e_fwd->weight < best_w) {
-          best_w = e_fwd->weight;
-          best_path = e_fwd->path_pixels;
-          found = true;
+        if (!new_path.empty()) {
+          graph_->addEdge(merged_id, nb, new_path, static_cast<double>(new_path.size()));
+        } else {
+          // Fallback to the shortest existing path from deleted nodes
+          double best_dist = std::numeric_limits<double>::infinity();
+          std::vector<std::pair<int, int>> best_path;
+          
+          for (int nid : cluster) {
+            auto edge = graph_->getEdge(nid, nb);
+            if (!edge) edge = graph_->getEdge(nb, nid); // Check bidirectional
+            if (edge && edge->weight < best_dist) {
+              best_dist = edge->weight;
+              best_path = edge->path_pixels;
+            }
+          }
+          if (!best_path.empty()) {
+            graph_->addEdge(merged_id, nb, best_path, static_cast<double>(best_path.size()));
+          }
         }
-
-        if (e_bwd && e_bwd->weight < best_w) {
-          best_w = e_bwd->weight;
-          best_path = e_bwd->path_pixels;
-          found = true;
-        }
       }
 
-      if (found && !best_path.empty()) {
-        graph_->addEdge(merged_id, nb, best_path, static_cast<double>(best_path.size()));
-      }
-    }
-
-    // Mark cluster nodes for removal
-    for (int node_id : cluster) {
-      nodes_to_remove.insert(node_id);
+      // Purge old nodes
+      for (int nid : cluster) graph_->removeNode(nid);
     }
   }
 
-  // Remove old nodes
-  RCLCPP_DEBUG(LOGGER, "Removing %zu old nodes...", nodes_to_remove.size());
-
-  for (int node_id : nodes_to_remove) {
-    try {
-      graph_->removeNode(node_id);
-    } catch (...) {
-    }
-  }
-
-  RCLCPP_DEBUG(LOGGER, "Merged %d clusters. Final: %zu nodes, %zu edges.", 
-               num_merged, graph_->nodes().size(), graph_->edges().size());
-
-  // Return updated node positions
+end_merge:
   for (const auto& [nid, node] : graph_->nodes()) {
     result[nid] = node.position;
   }
-
   return result;
 }
+
 
 std::pair<int, int> SkeletonGraphBuilder::snapToSkeleton(int x, int y, int max_search_radius) {
   x = std::max(0, std::min(x, width_ - 1));
   y = std::max(0, std::min(y, height_ - 1));
 
-  if (skeleton_.at<uint8_t>(y, x) > 0) {
-    return {x, y};
-  }
+  if (skeleton_.at<uint8_t>(y, x) > 0) return {x, y};
 
-  // Spiral search outward
   for (int radius = 1; radius <= max_search_radius; ++radius) {
     for (int dy = -radius; dy <= radius; ++dy) {
       for (int dx = -radius; dx <= radius; ++dx) {
-        int ny = y + dy;
-        int nx = x + dx;
-
-        if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_) {
-          if (skeleton_.at<uint8_t>(ny, nx) > 0) {
-            return {nx, ny};
-          }
+        int nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_ && skeleton_.at<uint8_t>(ny, nx) > 0) {
+          return {nx, ny};
         }
       }
     }
   }
-
-  // Fallback: return clamped original position
   return {x, y};
 }
 
-void SkeletonGraphBuilder::findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask) {
-  // Ensure strict binary (0 or 1)
-  cv::Mat skel_bin;
-  cv::threshold(skeleton_, skel_bin, 0, 1, cv::THRESH_BINARY);
+std::vector<std::pair<int, int>> SkeletonGraphBuilder::findSkeletonPath(
+    std::pair<int, int> start_pos, 
+    std::pair<int, int> end_pos) {
+    
+    std::vector<std::pair<int, int>> path;
+    int start_x = start_pos.first;
+    int start_y = start_pos.second;
+    int end_x = end_pos.first;
+    int end_y = end_pos.second;
 
-  // Endpoints detection
-  cv::Mat kernel = (cv::Mat_<int16_t>(3, 3) << 1, 1, 1, 1, 10, 1, 1, 1, 1);
-  cv::Mat neighbor_count;
-  cv::filter2D(skel_bin, neighbor_count, CV_16S, kernel, cv::Point(-1, -1), 0, cv::BORDER_CONSTANT);
+    // Validate boundaries and skeleton presence
+    if (start_x < 0 || start_x >= width_ || start_y < 0 || start_y >= height_ || 
+        skeleton_.at<uint8_t>(start_y, start_x) == 0) return path;
+        
+    if (end_x < 0 || end_x >= width_ || end_y < 0 || end_y >= height_ || 
+        skeleton_.at<uint8_t>(end_y, end_x) == 0) return path;
 
-  endpoints_mask = (neighbor_count == 11) & (skeleton_ != 0);
+    // Local tracking structures
+    std::vector<bool> visited(width_ * height_, false);
+    std::vector<std::pair<int, int>> parent(width_ * height_, {-1, -1});
+    std::queue<std::pair<int, int>> q;
 
-  // Intersection detection using Hit-or-Miss
-  intersections_mask = cv::Mat::zeros(skeleton_.size(), CV_8U);
+    q.push({start_x, start_y});
+    visited[start_y * width_ + start_x] = true;
+    bool found = false;
 
-  uint8_t T_d[] = {0, 1, 0, 1, 1, 1, 0, 0, 0};
-  cv::Mat T(3, 3, CV_8U, T_d);
-  uint8_t Y_d[] = {1, 0, 1, 0, 1, 0, 0, 1, 0};
-  cv::Mat Y(3, 3, CV_8U, Y_d);
-  uint8_t HX_d[] = {1, 0, 1, 0, 1, 0, 1, 0, 0};
-  cv::Mat HX(3, 3, CV_8U, HX_d);
-  uint8_t TY_d[] = {0, 0, 1, 1, 1, 0, 0, 1, 0};
-  cv::Mat TY(3, 3, CV_8U, TY_d);
-  uint8_t YT_d[] = {1, 0, 0, 0, 1, 1, 0, 1, 0};
-  cv::Mat YT(3, 3, CV_8U, YT_d);
-  uint8_t YH_d[] = {1, 0, 1, 0, 1, 1, 0, 1, 0};
-  cv::Mat YH(3, 3, CV_8U, YH_d);
-  uint8_t HY_d[] = {1, 0, 1, 1, 1, 0, 0, 1, 0};
-  cv::Mat HY(3, 3, CV_8U, HY_d);
-  uint8_t P_d[] = {0, 1, 0, 1, 1, 1, 0, 1, 0};
-  cv::Mat plus(3, 3, CV_8U, P_d);
-  uint8_t X_d[] = {1, 0, 1, 0, 1, 0, 1, 0, 1};
-  cv::Mat X(3, 3, CV_8U, X_d);
+    // Standard BFS
+    while (!q.empty()) {
+        auto [x, y] = q.front();
+        q.pop();
 
-  std::vector<cv::Mat> templates = {T, Y, TY, YT, HX, YH, HY, plus};
+        if (x == end_x && y == end_y) {
+            found = true;
+            break;
+        }
 
-  for (const auto& tmpl : templates) {
-    cv::Mat current = tmpl.clone();
+        for (const auto& nb : neighbors8(x, y)) {
+            int nx = nb.x;
+            int ny = nb.y;
+            int idx = ny * width_ + nx;
 
-    for (int i = 0; i < 4; ++i) {
-      cv::Mat hit, miss;
-
-      cv::morphologyEx(skeleton_, hit, cv::MORPH_ERODE, current);
-
-      cv::Mat ones = cv::Mat::ones(3, 3, CV_8U);
-      cv::morphologyEx(255 - skeleton_, miss, cv::MORPH_ERODE, ones - current);
-
-      intersections_mask = intersections_mask | (hit & miss);
-
-      cv::Mat rotated;
-      cv::rotate(current, rotated, cv::ROTATE_90_CLOCKWISE);
-      current = rotated;
+            if (skeleton_.at<uint8_t>(ny, nx) > 0 && !visited[idx]) {
+                visited[idx] = true;
+                parent[idx] = {x, y};
+                q.push({nx, ny});
+            }
+        }
     }
-  }
 
-  // Also apply X pattern
-  cv::Mat hit, miss;
-  cv::Mat ones = cv::Mat::ones(3, 3, CV_8U);
+    if (!found) return path;
 
-  cv::morphologyEx(skeleton_, hit, cv::MORPH_ERODE, X);
-  cv::morphologyEx(255 - skeleton_, miss, cv::MORPH_ERODE, ones - X);
+    // Reconstruct path backwards
+    std::pair<int, int> current = {end_x, end_y};
+    while (current.first != -1 && current.second != -1) {
+        path.push_back(current);
+        if (current.first == start_x && current.second == start_y) break;
+        current = parent[current.second * width_ + current.first];
+    }
 
-  intersections_mask = intersections_mask | (hit & miss);
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
+void SkeletonGraphBuilder::findSkeletonPoints(cv::Mat& intersections_mask, cv::Mat& endpoints_mask) {
+
+    cv::Mat skel_bin;
+    cv::threshold(skeleton_, skel_bin, 0, 1, cv::THRESH_BINARY);
+    skel_bin.convertTo(skel_bin, CV_16S); // Convert to signed 16-bit to prevent overflow during filtering
+
+    // Filter kernel: Center pixel has weight 10, neighbors have weight 1
+    // An endpoint (center + 1 neighbor) will sum exactly to 11
+    cv::Mat kernel = (cv::Mat_<int16_t>(3, 3) << 
+        1,  1,  1, 
+        1, 10,  1, 
+        1,  1,  1);
+        
+    cv::Mat neighbor_count;
+    cv::filter2D(skel_bin, neighbor_count, CV_16S, kernel, cv::Point(-1, -1), 0, cv::BORDER_CONSTANT);
+
+    endpoints_mask = (neighbor_count == 11);
+    
+    // Ensure endpoints only exist where skeleton actually is
+    endpoints_mask.setTo(0, skeleton_ == 0); 
+    endpoints_mask.convertTo(endpoints_mask, CV_8U, 255);
+
+
+    intersections_mask = cv::Mat::zeros(skeleton_.size(), CV_8U);
+
+    // OpenCV MORPH_HITMISS requires input image to be strictly 0 and 255
+    cv::Mat skel_255;
+    cv::threshold(skeleton_, skel_255, 0, 255, cv::THRESH_BINARY);
+
+    // Define 3-state kernels:
+    //  1 = strictly foreground
+    // -1 = strictly background
+    //  0 = don't care (can be either)
+
+    cv::Mat T = (cv::Mat_<int8_t>(3, 3) << 
+        -1,  1, -1,
+         1,  1,  1,
+        -1, -1, -1);
+
+    cv::Mat Y = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1,  1,
+        -1,  1, -1,
+         -1,  1,  -1);
+
+    cv::Mat TY = (cv::Mat_<int8_t>(3, 3) << 
+        -1, -1,  1,
+         1,  1, -1,
+        -1,  1, -1);
+
+    cv::Mat YT = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1, -1,
+        -1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat HX = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1,  1,
+        -1,  1, -1,
+         1, -1, -1);
+
+    cv::Mat YH = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1,  1,
+        -1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat HY = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1,  1,
+         1,  1, -1,
+        -1,  1, -1);
+        
+    cv::Mat plus = (cv::Mat_<int8_t>(3, 3) << 
+        -1,  1, -1,
+         1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat X = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1,  1,
+        -1,  1, -1,
+         1, -1,  1);
+
+    std::vector<cv::Mat> templates = {T, Y, TY, YT, HX, YH, HY, plus};
+
+    for (const auto& tmpl : templates) {
+        cv::Mat current = tmpl.clone();
+
+        for (int i = 0; i < 4; ++i) {
+            cv::Mat hit;
+            // Execute true 3-state Hit-or-Miss
+            cv::morphologyEx(skel_255, hit, cv::MORPH_HITMISS, current);
+            
+            intersections_mask = intersections_mask | hit;
+
+            // Rotate kernel 90 degrees clockwise for next iteration
+            cv::rotate(current, current, cv::ROTATE_90_CLOCKWISE);
+        }
+    }
+
+    // Apply the symmetrical X pattern (rotation invariant, only needs one pass)
+    cv::Mat hit_x;
+    cv::morphologyEx(skel_255, hit_x, cv::MORPH_HITMISS, X);
+    intersections_mask = intersections_mask | hit_x;
 }
 
 std::vector<cv::Point2i> SkeletonGraphBuilder::extractCoordsFromMask(const cv::Mat& mask) {
