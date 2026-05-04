@@ -85,12 +85,13 @@ void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
   cv::Mat visited_src(height_, width_, CV_32S, cv::Scalar(-1));
   cv::Mat visited_dist(height_, width_, CV_32S);
   visited_dist.setTo(std::numeric_limits<int>::max());
+  
+  // Pre-allocate map memory
+  std::unordered_map<uint64_t, std::pair<int, int>> parent_data;
+  parent_data.reserve(width_ * height_); 
 
-  // OPTIMIZATION: Use vector instead of unordered_map for O(1) parent lookup
-  std::vector<std::pair<int, int>> parent_data(height_ * width_, {-1, -1});
-
-  auto get_parent = [&](int src_id, int x, int y) -> std::pair<int, int>& {
-    return parent_data[y * width_ + x]; // O(1) direct access
+  auto make_key = [&](int src_id, int x, int y) -> uint64_t{
+    return (static_cast<uint64_t>(src_id) << 32) | static_cast<uint64_t>(y * width_ + x);
   };
 
   std::queue<std::tuple<int, int, int, int, bool>> queue;
@@ -135,7 +136,7 @@ void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
 
     visited_src.at<int>(y, x) = nid;
     visited_dist.at<int>(y, x) = 0;
-    get_parent(nid, x, y) = {-1, -1};
+    parent_data[make_key(nid, x, y)] = {-1, -1};
 
     queue.push(std::make_tuple(x, y, nid, initial_budget, true));
   }
@@ -157,13 +158,13 @@ void SkeletonGraphBuilder::executeBFS(
     std::queue<std::tuple<int, int, int, int, bool>>& queue,
     cv::Mat& visited_src,
     cv::Mat& visited_dist,
-    std::vector<std::pair<int, int>>& parent_data,
+    std::unordered_map<uint64_t, std::pair<int, int>>&  parent_data,
     bool find_entrances,
     int max_steps,
     int hysteresis) {
 
-  auto get_parent = [&](int src_id, int x, int y) -> std::pair<int, int>& {
-    return parent_data[y * width_ + x];
+  auto make_key = [&](int src_id, int x, int y) -> uint64_t{
+    return (static_cast<uint64_t>(src_id) << 32) | static_cast<uint64_t>(y * width_ + x);
   };
 
   while (!queue.empty()) {
@@ -197,7 +198,7 @@ void SkeletonGraphBuilder::executeBFS(
         int new_budget = remaining_budget - 1;
         visited_src.at<int>(ny, nx) = srcid;
         visited_dist.at<int>(ny, nx) = new_distance;
-        get_parent(srcid, nx, ny) = {x, y};
+        parent_data[make_key(srcid, nx, ny)] = {x, y};
 
         // Hysteresis based on robot size
         if (new_budget > max_steps / 2) {
@@ -215,7 +216,7 @@ void SkeletonGraphBuilder::executeBFS(
             int entrance_id = createEntranceNode(cv::Point2i(nx, ny), srcid, parent_data);
             visited_src.at<int>(ny, nx) = entrance_id;
             visited_dist.at<int>(ny, nx) = 0;
-            get_parent(entrance_id, nx, ny) = {-1, -1};
+            parent_data[make_key(entrance_id, nx, ny)] = {-1, -1};
             queue.push(std::make_tuple(nx, ny, entrance_id, max_steps, parent_decreasing));
           } else {
             // Reset budget but keep same source
@@ -237,11 +238,11 @@ void SkeletonGraphBuilder::executeBFS(
           // Both exhausted - create collision node
           visited_src.at<int>(ny, nx) = srcid;
           visited_dist.at<int>(ny, nx) = visited_dist.at<int>(y, x) + 1;
-          get_parent(srcid, nx, ny) = {x, y};
+          parent_data[make_key(srcid, nx, ny)] = {x, y};
 
           int collision_id = createCollisionNode(cv::Point2i(nx, ny), srcid, neighbor_src, parent_data);
           visited_src.at<int>(ny, nx) = collision_id;
-          get_parent(collision_id, nx, ny) = {-1, -1};
+          parent_data[make_key(collision_id, nx, ny)] = {-1, -1};
 
           visited_dist.at<int>(ny, nx) = 0;
           queue.push(std::make_tuple(nx, ny, collision_id, max_steps, parent_decreasing));
@@ -298,7 +299,7 @@ void SkeletonGraphBuilder::pruneShortBranches(int max_length) {
 int SkeletonGraphBuilder::createEntranceNode(
     const cv::Point2i& p,
     int parent_src_id,
-    std::vector<std::pair<int, int>>& parent_data) {
+    std::unordered_map<uint64_t, std::pair<int, int>>& parent_data) {
   int entrance_id = next_node_id_++;
   graph_->addNode(entrance_id, {p.x, p.y}, "entrance");
 
@@ -314,7 +315,7 @@ int SkeletonGraphBuilder::createCollisionNode(
     const cv::Point2i& p,
     int src1,
     int src2,
-    std::vector<std::pair<int, int>>& parent_data) {
+    std::unordered_map<uint64_t, std::pair<int, int>>&  parent_data) {
   int collision_id = next_node_id_++;
   graph_->addNode(collision_id, {p.x, p.y}, "collision");
 
@@ -331,19 +332,21 @@ int SkeletonGraphBuilder::createCollisionNode(
 std::vector<cv::Point2i> SkeletonGraphBuilder::reconstructPath(
     const cv::Point2i& p,
     int src_id,
-    const std::vector<std::pair<int, int>>& parent_data) {
-  std::vector<cv::Point2i> path;
+    const std::unordered_map<uint64_t, std::pair<int, int>>& parent_data) {
 
+  std::vector<cv::Point2i> path;
   cv::Point2i current = p;
   while (true) {
     path.push_back(current);
+    uint64_t key = (static_cast<uint64_t>(src_id) << 32) |
+      static_cast<uint64_t>(current.y * width_ + current.x);
+    auto it = parent_data.find(key);
 
-    int idx = current.y * width_ + current.x;
-    auto [px, py] = parent_data[idx];
-
-    if (px == -1 && py == -1) break;
-
-    current = {px, py};
+    if (it == parent_data.end() || (it->second.first == -1 && it-> second.second == -1)){
+      break;
+    }
+    
+    current = cv::Point2i(it-> second.first, it-> second.second);
   }
 
   std::reverse(path.begin(), path.end());
@@ -355,7 +358,7 @@ std::vector<cv::Point2i> SkeletonGraphBuilder::reconstructPathCollision(
     const cv::Point2i& neigh_xy,
     int src_current,
     int src_neighbor,
-    const std::vector<std::pair<int, int>>& parent_data) {
+    const std::unordered_map<uint64_t, std::pair<int, int>>& parent_data) {
   std::vector<cv::Point2i> path_current = reconstructPath(cur_xy, src_current, parent_data);
   std::vector<cv::Point2i> path_neighbor = reconstructPath(neigh_xy, src_neighbor, parent_data);
 
@@ -394,8 +397,15 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
 
     for (size_t i = 0; i < nodes.size(); ++i) {
       for (size_t j = i + 1; j < nodes.size(); ++j) {
-        auto p1 = graph_->nodes().at(nodes[i]).position;
-        auto p2 = graph_->nodes().at(nodes[j]).position;
+        const auto& n1 = graph_->nodes().at(nodes[i]);
+        const auto& n2 = graph_->nodes().at(nodes[j]);
+
+        // Enforce same type
+        if (n1.type != n2.type)
+          continue;
+
+        auto p1 = n1.position;
+        auto p2 = n2.position;
         if (std::hypot(p1.first - p2.first, p1.second - p2.second) <= distance_threshold) {
           parent[find_root(nodes[i])] = find_root(nodes[j]);
         }
@@ -427,12 +437,7 @@ std::unordered_map<int, std::pair<int, int>> SkeletonGraphBuilder::mergeCloseNod
         }
       }
 
-      // Majority vote for merged node type
-      std::string merged_type;
-      int max_count = -1;
-      for (const auto& [t, c] : type_counts) {
-        if (c > max_count) { max_count = c; merged_type = t; }
-      }
+      std::string merged_type = graph_->nodes().at(cluster[0]).type;
 
       // Snap barycenter (using max_search_radius=5 matching Python)
       auto [snapx, snapy] = snapToSkeleton(std::round(bx / cluster.size()), std::round(by / cluster.size()), 5);

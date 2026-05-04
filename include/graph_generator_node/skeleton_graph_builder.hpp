@@ -102,7 +102,7 @@ private:
         std::queue<std::tuple<int, int, int, int, bool>>& queue,
         cv::Mat& visited_src,
         cv::Mat& visited_dist,
-        std::vector<std::pair<int, int>>& parent_data,
+        std::unordered_map<uint64_t, std::pair<int, int>>& parent_data,
         bool find_entrances,
         int max_steps,
         int hysteresis);
@@ -116,7 +116,7 @@ private:
    */
   int createEntranceNode(const cv::Point2i& p, 
                          int parent_src_id,
-                         std::vector<std::pair<int, int>>& parent_data);
+                         std::unordered_map<uint64_t, std::pair<int, int>>& parent_data);
 
     /**
    * @brief Create collision node where two sources meet with exhausted budgets
@@ -129,7 +129,7 @@ private:
   int createCollisionNode(const cv::Point2i& p, 
                           int src1, 
                           int src2,
-                          std::vector<std::pair<int, int>>& parent_data);
+                          std::unordered_map<uint64_t, std::pair<int, int>>& parent_data);
 
       /**
    * @brief Reconstruct path from pixel back to source by following parent pointers
@@ -141,7 +141,7 @@ private:
   std::vector<cv::Point2i> reconstructPath(
       const cv::Point2i& p,
       int src_id,
-      const std::vector<std::pair<int, int>>& parent_data);
+      const std::unordered_map<uint64_t, std::pair<int, int>>& parent_data);
 
     /**
    * @brief Reconstruct path when two sources collide
@@ -159,7 +159,7 @@ private:
       const cv::Point2i& neigh_xy,
       int src_current,
       int src_neighbor,
-      const std::vector<std::pair<int, int>>& parent_data);
+      const std::unordered_map<uint64_t, std::pair<int, int>>& parent_data);
 
   /**
    * @brief Find skeleton intersection and endpoint points

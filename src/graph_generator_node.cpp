@@ -31,7 +31,7 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
     max_bfs_steps_ = this->declare_parameter<int>(
         "max_bfs_steps", 1000);
     hysteresis_ = this->declare_parameter<int>(
-        "hysteresis", 5);
+        "hysteresis", 10);
     find_entrances_ = this->declare_parameter<bool>(
         "find_entrances", true);
     robot_radius_ = this->declare_parameter<double>(
@@ -140,10 +140,10 @@ void GraphGeneratorNode::costmapCallback(
     auto [graph, node_positions] =
         builder.buildGraph(max_bfs_steps_, hysteresis_, find_entrances_);
 
-    // if (robot_radius_ > 0.0) {
-    //     std::vector<std::string> types_to_merge = {"intersection", "enpoint", "collision"};
-    //     node_positions = builder.mergeCloseNodes(robot_radius_ /2 , types_to_merge);
-    // }
+    if (robot_radius_ > 0.0) {
+        std::vector<std::string> types_to_merge = {"intersection", "enpoint", "collision"};
+        node_positions = builder.mergeCloseNodes(robot_radius_ /2 , types_to_merge);
+    }
 
     publishGraphMarkers(*msg, graph);
     publishGraphJson(*msg, graph);
