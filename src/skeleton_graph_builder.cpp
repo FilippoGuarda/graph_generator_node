@@ -597,27 +597,38 @@ void SkeletonGraphBuilder::findSkeletonPoints(cv::Mat& intersections_mask, cv::M
     // -1 = strictly background
     //  0 = don't care (can be either)
 
-    cv::Mat T = (cv::Mat_<int8_t>(3, 3) << 
-        -1,  1, -1,
-         1,  1,  1,
-        -1, -1, -1);
 
     cv::Mat Y = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1,  1,
+         1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat YT = (cv::Mat_<int8_t>(3, 3) << 
+        -1, -1,  1,
+         1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat TY = (cv::Mat_<int8_t>(3, 3) << 
+         1, -1, -1,
+         1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat T = (cv::Mat_<int8_t>(3, 3) << 
+        -1, -1, -1,
+         1,  1,  1,
+        -1,  1, -1);
+
+    cv::Mat y = (cv::Mat_<int8_t>(3, 3) << 
          1, -1,  1,
         -1,  1, -1,
          -1,  1,  -1);
 
-    cv::Mat TY = (cv::Mat_<int8_t>(3, 3) << 
+    cv::Mat dY = (cv::Mat_<int8_t>(3, 3) << 
         -1, -1,  1,
          1,  1, -1,
         -1,  1, -1);
 
-    cv::Mat YT = (cv::Mat_<int8_t>(3, 3) << 
-         1, -1, -1,
-        -1,  1,  1,
-        -1,  1, -1);
-
-    cv::Mat HX = (cv::Mat_<int8_t>(3, 3) << 
+    cv::Mat dT = (cv::Mat_<int8_t>(3, 3) << 
          1, -1,  1,
         -1,  1, -1,
          1, -1, -1);
@@ -642,7 +653,7 @@ void SkeletonGraphBuilder::findSkeletonPoints(cv::Mat& intersections_mask, cv::M
         -1,  1, -1,
          1, -1,  1);
 
-    std::vector<cv::Mat> templates = {T, Y, TY, YT, HX, YH, HY, plus};
+    std::vector<cv::Mat> templates = {T, y, Y, TY, YT, dY, dT, YH, HY, plus};
 
     for (const auto& tmpl : templates) {
         cv::Mat current = tmpl.clone();
