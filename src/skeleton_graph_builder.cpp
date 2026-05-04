@@ -26,7 +26,7 @@ SkeletonGraphBuilder::SkeletonGraphBuilder(
 }
 
 std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
-SkeletonGraphBuilder::buildGraph(int max_steps, int hysteresis, bool find_entrances) {
+SkeletonGraphBuilder::buildGraph(int hysteresis, int max_entrance_distance, bool find_entrances) {
   RCLCPP_DEBUG(LOGGER, "Starting buildGraph...");
 
   // Step 1: Find skeleton features
@@ -59,8 +59,8 @@ SkeletonGraphBuilder::buildGraph(int max_steps, int hysteresis, bool find_entran
       inter_positions,
       endpoint_positions,
       find_entrances,
-      max_steps,
-      hysteresis);
+      hysteresis,
+      max_entrance_distance);
 
   // Step 4: Collect node positions
   std::unordered_map<int, std::pair<int, int>> node_positions;
@@ -68,7 +68,7 @@ SkeletonGraphBuilder::buildGraph(int max_steps, int hysteresis, bool find_entran
     node_positions[nid] = node.position;
   }
 
-  pruneShortBranches(hysteresis);
+  pruneShortBranches(max_entrance_distance);
 
   RCLCPP_DEBUG(LOGGER, "Finished. Graph nodes: %zu, Edges: %zu", graph_->nodes().size(), graph_->edges().size());
 
@@ -79,8 +79,8 @@ void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
     const std::unordered_map<int, std::pair<int, int>>& intersection_positions,
     const std::unordered_map<int, std::pair<int, int>>& endpoint_positions,
     bool find_entrances,
-    int max_steps,
-    int hysteresis) {
+    int hysteresis,
+    int max_entrance_distance) {
   // Initialize tracking structures
   cv::Mat visited_src(height_, width_, CV_32S, cv::Scalar(-1));
   cv::Mat visited_dist(height_, width_, CV_32S);
@@ -132,7 +132,7 @@ void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
     if (x < 0 || x >= width_ || y < 0 || y >= height_) continue;
     if (skeleton_.at<uint8_t>(y, x) == 0) continue;
 
-    int initial_budget = max_steps; // Use flat budget for all sources
+    int initial_budget = hysteresis; // Use flat budget for all sources
 
     visited_src.at<int>(y, x) = nid;
     visited_dist.at<int>(y, x) = 0;
@@ -150,8 +150,8 @@ void SkeletonGraphBuilder::buildGraphMultiSourceBFS(
       visited_dist,
       parent_data,
       find_entrances,
-      max_steps,
-      hysteresis);
+      hysteresis,
+      max_entrance_distance);
 }
 
 void SkeletonGraphBuilder::executeBFS(
@@ -160,8 +160,8 @@ void SkeletonGraphBuilder::executeBFS(
     cv::Mat& visited_dist,
     std::unordered_map<uint64_t, std::pair<int, int>>&  parent_data,
     bool find_entrances,
-    int max_steps,
-    int hysteresis) {
+    int hysteresis,
+    int max_entrance_distance) {
 
   auto make_key = [&](int src_id, int x, int y) -> uint64_t{
     return (static_cast<uint64_t>(src_id) << 32) | static_cast<uint64_t>(y * width_ + x);
@@ -201,7 +201,7 @@ void SkeletonGraphBuilder::executeBFS(
         parent_data[make_key(srcid, nx, ny)] = {x, y};
 
         // Hysteresis based on robot size
-        if (new_budget > max_steps / 2) {
+        if (new_budget > hysteresis) {
           // Continue with current source
           queue.push(std::make_tuple(nx, ny, srcid, new_budget, parent_decreasing));
           continue;
@@ -211,16 +211,16 @@ void SkeletonGraphBuilder::executeBFS(
           // Since we reached minima, now next node will see increasing direction
           parent_decreasing = false;
 
-          if (find_entrances && child_distance < static_cast<float>(hysteresis)) {
+          if (find_entrances && child_distance < static_cast<float>(max_entrance_distance)) {
             // Create entrance node if the area is not twice the size of the robot
             int entrance_id = createEntranceNode(cv::Point2i(nx, ny), srcid, parent_data);
             visited_src.at<int>(ny, nx) = entrance_id;
             visited_dist.at<int>(ny, nx) = 0;
             parent_data[make_key(entrance_id, nx, ny)] = {-1, -1};
-            queue.push(std::make_tuple(nx, ny, entrance_id, max_steps, parent_decreasing));
+            queue.push(std::make_tuple(nx, ny, entrance_id, hysteresis, parent_decreasing));
           } else {
             // Reset budget but keep same source
-            queue.push(std::make_tuple(nx, ny, srcid, max_steps, parent_decreasing));
+            queue.push(std::make_tuple(nx, ny, srcid, hysteresis, parent_decreasing));
           }
           continue;
         } else {
@@ -234,7 +234,7 @@ void SkeletonGraphBuilder::executeBFS(
         int u = std::min(srcid, neighbor_src);
         int v = std::max(srcid, neighbor_src);
 
-        if (remaining_budget <= 0 && visited_dist.at<int>(y, x) > max_steps && child_distance <= static_cast<float>(max_steps)) {
+        if (remaining_budget <= 0 && visited_dist.at<int>(y, x) > hysteresis && child_distance <= static_cast<float>(hysteresis)) {
           // Both exhausted - create collision node
           visited_src.at<int>(ny, nx) = srcid;
           visited_dist.at<int>(ny, nx) = visited_dist.at<int>(y, x) + 1;
@@ -245,7 +245,7 @@ void SkeletonGraphBuilder::executeBFS(
           parent_data[make_key(collision_id, nx, ny)] = {-1, -1};
 
           visited_dist.at<int>(ny, nx) = 0;
-          queue.push(std::make_tuple(nx, ny, collision_id, max_steps, parent_decreasing));
+          queue.push(std::make_tuple(nx, ny, collision_id, hysteresis, parent_decreasing));
 
           // Update u,v to link to the new collision node instead of the neighbor
           u = std::min(srcid, collision_id);

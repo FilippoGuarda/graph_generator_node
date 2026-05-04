@@ -55,11 +55,13 @@ private:
     std::string input_topic_;
     std::string global_frame_;
     int obstacle_size_threshold_;
-    int max_bfs_steps_;
+    int max_entrance_distance_;
     int hysteresis_;
     int skeleton_threshold_;
     bool find_entrances_;
+    bool cluster_nodes_;
     double robot_radius_;
+    double cluster_radius_;
 
     // State
     std::mutex map_mutex_;

@@ -24,6 +24,8 @@ public:
     struct Edge {
         std::vector<std::pair<int, int>> path_pixels; // Path coordinates
         double weight; // Edge weight (typically path length)
+
+        std::vector<double> gradient;
     };
 
     NetworkX() = default;

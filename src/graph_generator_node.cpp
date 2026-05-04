@@ -28,14 +28,18 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
         "obstacle_size_threshold", 2);
     skeleton_threshold_ = this->declare_parameter<int>(
         "skeleton_threshold", 10);
-    max_bfs_steps_ = this->declare_parameter<int>(
-        "max_bfs_steps", 1000);
     hysteresis_ = this->declare_parameter<int>(
-        "hysteresis", 10);
+        "max_steps", 20);
+    max_entrance_distance_ = this->declare_parameter<int>(
+        "max_entrance_distance", 10);
+    robot_radius_ = this->declare_parameter<double>(
+        "robot_radius", 15.0);
+    cluster_radius_ = this->declare_parameter<double>(
+        "cluster_radius", 3.0);
     find_entrances_ = this->declare_parameter<bool>(
         "find_entrances", true);
-    robot_radius_ = this->declare_parameter<double>(
-        "robot_radius", 20.0);
+    cluster_nodes_ = this->declare_parameter<bool>(
+        "cluster_nodes", true);
 
     // Subscriptions
     costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -100,7 +104,7 @@ void GraphGeneratorNode::costmapCallback(
 
     // Define maximum inflation distance in pixels for the gradient fade.
     // Replace 20.0f with your required radius (e.g., inflation_radius_meters / map_resolution)
-    const float max_dist_px = robot_radius_ * 2;
+    const float max_dist_px = robot_radius_ ;
 
     // Clamp the distances to max_dist_px
     cv::Mat clamped_dist;
@@ -138,11 +142,11 @@ void GraphGeneratorNode::costmapCallback(
     // Continue with graph generation...
     SkeletonGraphBuilder builder(skeleton, distmap);
     auto [graph, node_positions] =
-        builder.buildGraph(max_bfs_steps_, hysteresis_, find_entrances_);
+        builder.buildGraph(hysteresis_, max_entrance_distance_, find_entrances_);
 
-    if (robot_radius_ > 0.0) {
+    if (robot_radius_ > 0.0 and cluster_nodes_) {
         std::vector<std::string> types_to_merge = {"intersection", "enpoint", "collision"};
-        node_positions = builder.mergeCloseNodes(robot_radius_ /2 , types_to_merge);
+        node_positions = builder.mergeCloseNodes(cluster_radius_ , types_to_merge);
     }
 
     publishGraphMarkers(*msg, graph);

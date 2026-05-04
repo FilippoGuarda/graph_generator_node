@@ -9,18 +9,19 @@ graph_generator_node:
     # GRID-FAST preprocessing parameters
     # Minimum obstacle size in cells to preserve (removes noise)
     obstacle_size_threshold: 2
-    skeleton_threshold: 20
+    skeleton_threshold: 10
     
     # Graph building parameters
     # Maximum BFS propagation budget for each source
-    max_bfs_steps: 200 
+    max_steps: 10
     
     # Enable entrance node creation when a source's budget is exhausted
     # If false, budget is silently reset without creating nodes
     find_entrances: true
+    cluster_nodes: false
+    cluster_radius: 3.0
     
     # Node merging distance threshold (reserved, not yet implemented)
     # Set to 0.0 to disable node merging
     robot_radius: 20.0
-    hysteresis: 20 
-0
+    max_entrance_distance: 20 
