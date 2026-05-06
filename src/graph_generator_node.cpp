@@ -40,6 +40,10 @@ GraphGeneratorNode::GraphGeneratorNode(const rclcpp::NodeOptions& options)
         "find_entrances", true);
     cluster_nodes_ = this->declare_parameter<bool>(
         "cluster_nodes", true);
+    prune_ = this->declare_parameter<bool>(
+        "prune", true);
+    stagger_points_ = this->declare_parameter<bool>(
+        "stagger_points", true);
 
     // Subscriptions
     costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -85,13 +89,17 @@ void GraphGeneratorNode::costmapCallback(
     // Step 4: Distance map on the original filtered map
     cv::Mat distmap;
     cv::distanceTransform(filtered, distmap, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+    cv::GaussianBlur(distmap, distmap, cv::Size(5, 5), 1.0);
 
-    // Step 5: Build an explicit free-space mask for staggered point placement
-    // free_mask semantics: 255 = free, 0 = obstacle
+    // Step 5: Build an explicitly zero free-space mask for staggered point placement
+    // free_mask: 255 = free, 0 = obstacle
     cv::Mat free_mask = (filtered == 0);
     // free_mask.convertTo(free_mask, CV_8U, 255);
 
     // Step 6: Distance map in free space, used to decide where staggered points are valid
+    // NOTE: do NOT be a smartass and use distmap, it completely breaks
+    // the skeleton generation, why? It's like doing the same thing twice right?
+    // well I DO NOT KNOW and I don't have time to find out
      cv::Mat free_dist;
      cv::distanceTransform(free_mask, free_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
 
@@ -147,11 +155,11 @@ void GraphGeneratorNode::costmapCallback(
     // Continue with graph generation...
     SkeletonGraphBuilder builder(skeleton, distmap);
     auto [graph, node_positions] =
-        builder.buildGraph(hysteresis_, max_entrance_distance_, find_entrances_);
+        builder.buildGraph(hysteresis_, max_entrance_distance_, find_entrances_, prune_);
 
     // Step 11: Cluster nodes and publish
-    if (robot_radius_ > 0.0 and cluster_nodes_) {
-        std::vector<std::string> types_to_merge = {"intersection", "enpoint", "collision"};
+    if (cluster_nodes_) {
+        std::vector<std::string> types_to_merge = {"intersection", "collision"};
         node_positions = builder.mergeCloseNodes(cluster_radius_ , types_to_merge);
     }
 
@@ -273,10 +281,18 @@ cv::Mat GraphGeneratorNode::gridFastLikeCleanup(const cv::Mat& cleaned_map) {
 
 cv::Mat GraphGeneratorNode::buildSkeleton(const cv::Mat& filtered_map) {
 
-    cv::Mat momentum_skeleton = momentumFieldSkeleton(filtered_map, skeleton_threshold_);
+    cv::Mat skeleton_map;
+
+    if(skeleton_threshold_ > 0){
+        skeleton_map = momentumFieldSkeleton(filtered_map, skeleton_threshold_);
+    } else {
+        skeleton_map = filtered_map > 0;
+        skeleton_map.convertTo(skeleton_map, CV_8U, 255);
+    }
+    
 
     cv::Mat skeleton;
-    cv::ximgproc::thinning(momentum_skeleton, skeleton, cv::ximgproc::THINNING_ZHANGSUEN);
+    cv::ximgproc::thinning(skeleton_map, skeleton, cv::ximgproc::THINNING_ZHANGSUEN);
 
     return skeleton;
 }
@@ -322,11 +338,15 @@ void GraphGeneratorNode::addStaggeredPoints(cv::Mat& map, const cv::Mat& dist_ma
 
     int spacing_x = scaled_robot_size;
     int spacing_y = static_cast<int>(scaled_robot_size * std::sqrt(3.0) / 2.0);
-
+    int offset;
     int row = 0;
     int column = 0;
     for (int y = 0; y < h; y += spacing_y) {
-        int offset = (row % 2 == 0) ? 0 : spacing_x / 2;
+        if(stagger_points_){
+            offset = (row % 2 == 0) ? 0 : spacing_x / 2;
+        } else {
+            offset = 0;
+        }
         for (int x = offset; x < w; x += spacing_x) {
             float d = dist_map.at<float>(y, x);
             if (d > static_cast<float>(scaled_robot_size)) {

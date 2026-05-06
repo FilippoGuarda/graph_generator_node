@@ -60,6 +60,8 @@ private:
     int skeleton_threshold_;
     bool find_entrances_;
     bool cluster_nodes_;
+    bool prune_;
+    bool stagger_points_;
     double robot_radius_;
     double cluster_radius_;
 

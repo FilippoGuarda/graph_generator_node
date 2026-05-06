@@ -26,7 +26,7 @@ SkeletonGraphBuilder::SkeletonGraphBuilder(
 }
 
 std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
-SkeletonGraphBuilder::buildGraph(int hysteresis, int max_entrance_distance, bool find_entrances) {
+SkeletonGraphBuilder::buildGraph(int hysteresis, int max_entrance_distance, bool find_entrances, bool prune) {
   RCLCPP_DEBUG(LOGGER, "Starting buildGraph...");
 
   // Step 1: Find skeleton features
@@ -68,7 +68,9 @@ SkeletonGraphBuilder::buildGraph(int hysteresis, int max_entrance_distance, bool
     node_positions[nid] = node.position;
   }
 
-  pruneShortBranches(max_entrance_distance);
+  if (prune){
+    pruneShortBranches(max_entrance_distance);
+  }
 
   RCLCPP_DEBUG(LOGGER, "Finished. Graph nodes: %zu, Edges: %zu", graph_->nodes().size(), graph_->edges().size());
 
@@ -200,6 +202,11 @@ void SkeletonGraphBuilder::executeBFS(
         visited_dist.at<int>(ny, nx) = new_distance;
         parent_data[make_key(srcid, nx, ny)] = {x, y};
 
+        if(!find_entrances){
+          queue.push(std::make_tuple(nx, ny, srcid, new_budget, parent_decreasing));
+          continue;
+        }
+
         // Hysteresis based on robot size
         if (new_budget > hysteresis) {
           // Continue with current source
@@ -211,7 +218,7 @@ void SkeletonGraphBuilder::executeBFS(
           // Since we reached minima, now next node will see increasing direction
           parent_decreasing = false;
 
-          if (find_entrances && child_distance < static_cast<float>(max_entrance_distance)) {
+          if (child_distance < static_cast<float>(max_entrance_distance)) {
             // Create entrance node if the area is not twice the size of the robot
             int entrance_id = createEntranceNode(cv::Point2i(nx, ny), srcid, parent_data);
             visited_src.at<int>(ny, nx) = entrance_id;
@@ -234,7 +241,7 @@ void SkeletonGraphBuilder::executeBFS(
         int u = std::min(srcid, neighbor_src);
         int v = std::max(srcid, neighbor_src);
 
-        if (remaining_budget <= 0 && visited_dist.at<int>(y, x) > hysteresis && child_distance <= static_cast<float>(hysteresis)) {
+        if (find_entrances && remaining_budget <= 0 && visited_dist.at<int>(y, x) > hysteresis && child_distance <= static_cast<float>(hysteresis)) {
           // Both exhausted - create collision node
           visited_src.at<int>(ny, nx) = srcid;
           visited_dist.at<int>(ny, nx) = visited_dist.at<int>(y, x) + 1;

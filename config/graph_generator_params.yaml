@@ -18,10 +18,10 @@ graph_generator_node:
     # Enable entrance node creation when a source's budget is exhausted
     # If false, budget is silently reset without creating nodes
     find_entrances: true
-    cluster_nodes: false
+    cluster_nodes: true
+    prune: true
+    stagger_points: false
     cluster_radius: 3.0
     
-    # Node merging distance threshold (reserved, not yet implemented)
-    # Set to 0.0 to disable node merging
     robot_radius: 20.0
-    max_entrance_distance: 20 
+    max_entrance_distance: 10

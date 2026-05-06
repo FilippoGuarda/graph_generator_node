@@ -37,14 +37,16 @@ public:
    * 2. Initialize multi-source BFS with budget allocation
    * 3. Propagate from each source with budget-based termination
    * 4. Create entrance nodes at budget boundaries if enabled
-   * 5. Create collision nodes where paths from different sources meet
+   * 5. Prune short branches if enabled
+   * 6. Create collision nodes where paths from different sources meet
    * 
    * @param max_steps Maximum propagation budget per source (typically 2x robot diameter)
    * @param find_entrances Create entrance nodes at budget boundaries (default: true)
+   * @param prune Prune short branches (default: true)
    * @return Pair of (graph pointer, node_positions_map)
    */
     std::pair<std::shared_ptr<NetworkX>, std::unordered_map<int, std::pair<int, int>>>
-    buildGraph(int max_steps = 100, int hysteresis = 20, bool find_entrances = true);
+    buildGraph(int max_steps = 100, int hysteresis = 20, bool find_entrances = true, bool prune = true);
 
   /**
    * @brief Merge nodes within distance threshold
