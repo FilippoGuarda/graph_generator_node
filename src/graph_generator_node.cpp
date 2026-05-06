@@ -82,8 +82,9 @@ void GraphGeneratorNode::costmapCallback(
     cv::Mat filtered = gridFastLikeCleanup(cleaned);
     // filtered semantics: 0 = free, 255 = obstacle
 
-    // Step 4: Distance map on the original filtered map if you still need it elsewhere
-    cv::Mat distmap = computeDistanceMap(filtered);
+    // Step 4: Distance map on the original filtered map
+    cv::Mat distmap;
+    cv::distanceTransform(filtered, distmap, cv::DIST_L2, cv::DIST_MASK_PRECISE);
 
     // Step 5: Build an explicit free-space mask for staggered point placement
     // free_mask semantics: 255 = free, 0 = obstacle
@@ -91,8 +92,8 @@ void GraphGeneratorNode::costmapCallback(
     // free_mask.convertTo(free_mask, CV_8U, 255);
 
     // Step 6: Distance map in free space, used to decide where staggered points are valid
-    cv::Mat free_dist;
-    cv::distanceTransform(free_mask, free_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+     cv::Mat free_dist;
+     cv::distanceTransform(free_mask, free_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
 
     // Step 7: Apply staggered points INSIDE FREE SPACE
     // addStaggeredPoints expects map=255 where valid space exists and writes 0 where points are carved
@@ -101,6 +102,8 @@ void GraphGeneratorNode::costmapCallback(
     // Step 8: Recompute distance transform from the staggered free-space mask
     cv::Mat map_lane_dist;
     cv::distanceTransform(free_mask, map_lane_dist, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+
+    /* THIS SECTION IS ONLY NECESSARY FOR VISUALIZATION*/
 
     // Define maximum inflation distance in pixels for the gradient fade.
     // Replace 20.0f with your required radius (e.g., inflation_radius_meters / map_resolution)
@@ -124,6 +127,8 @@ void GraphGeneratorNode::costmapCallback(
     // Publish the map directly
     publishFilteredMap(*msg, dist_vis);
 
+    /*===================================================*/
+
     // Step 9: Build skeleton from distance map
     cv::Mat skeleton = buildSkeleton(map_lane_dist);
 
@@ -144,6 +149,7 @@ void GraphGeneratorNode::costmapCallback(
     auto [graph, node_positions] =
         builder.buildGraph(hysteresis_, max_entrance_distance_, find_entrances_);
 
+    // Step 11: Cluster nodes and publish
     if (robot_radius_ > 0.0 and cluster_nodes_) {
         std::vector<std::string> types_to_merge = {"intersection", "enpoint", "collision"};
         node_positions = builder.mergeCloseNodes(cluster_radius_ , types_to_merge);
