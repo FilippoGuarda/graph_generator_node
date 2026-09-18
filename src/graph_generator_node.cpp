@@ -166,9 +166,9 @@ void GraphGeneratorNode::costmapCallback(
     publishGraphMarkers(*msg, graph);
     publishGraphJson(*msg, graph);
 
-    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-        "Graph: %zu nodes, %zu edges",
-        graph->nodes().size(), graph->edges().size());
+    // RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    //     "Graph: %zu nodes, %zu edges",
+    //     graph->nodes().size(), graph->edges().size());
 }
 
 void GraphGeneratorNode::publishFilteredMap(

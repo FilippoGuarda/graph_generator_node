@@ -36,7 +36,7 @@ SkeletonGraphBuilder::buildGraph(int hysteresis, int max_entrance_distance, bool
   std::vector<cv::Point2i> inter_coords = extractCoordsFromMask(intersections_mask);
   std::vector<cv::Point2i> endpoint_coords = extractCoordsFromMask(endpoints_mask);
 
-  RCLCPP_INFO(LOGGER, "Found %zu intersections and %zu endpoints.", inter_coords.size(), endpoint_coords.size());
+  // RCLCPP_INFO(LOGGER, "Found %zu intersections and %zu endpoints.", inter_coords.size(), endpoint_coords.size());
 
   if (inter_coords.empty() && endpoint_coords.empty()) {
     RCLCPP_WARN(LOGGER, "No skeleton points found. Graph will be empty.");
